@@ -1,5 +1,28 @@
 # Panduan Dataset Bersih Aluminium
 
+## Ringkas Dataset Clean
+Dataset ini berisi **harga aluminium berbasis event**. Artinya, hanya hari ketika harga berubah yang disimpan. Ini membuat data lebih bersih dan lebih cocok untuk modeling dibanding data harian penuh yang banyak berisi harga konstan.
+
+## Kolom Utama yang Dipakai
+- `Date` = tanggal event perubahan harga
+- `Close` = harga penutupan pada event tersebut
+- `Return` = perubahan persentase dari event sebelumnya
+
+Kolom lain (jika ada) adalah flag kualitas dan informasi tambahan.
+
+## Contoh Data
+
+| Date | Close | Return |
+|---|---:|---:|
+| 2019-06-27 | 1820.00 | -0.1820 |
+| 2019-07-01 | 1793.50 | -0.0146 |
+| 2019-07-02 | 1805.00 | 0.0064 |
+| 2019-07-03 | 1812.25 | 0.0040 |
+| 2019-07-05 | 1830.00 | 0.0098 |
+
+Catatan: contoh di atas hanya untuk menunjukkan format tabel, bukan kutipan resmi.
+
+---
 
 ## Ringkas Tujuan
 File ini adalah **dataset bersih berbasis event** (hanya hari saat harga berubah) untuk harga Aluminium futures (`ALI=F`). Tujuannya membuat data lebih konsisten dan layak untuk modeling.

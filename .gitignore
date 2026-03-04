@@ -36,4 +36,4 @@ outputs/
 results/
 
 # Data artifacts
-models/
+notebooks/data/
