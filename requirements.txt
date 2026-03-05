@@ -4,6 +4,9 @@ scikit-learn
 matplotlib
 seaborn
 jupyterlab
+ipywidgets
 streamlit
 altair==4.2.2
 yfinance
+xgboost
+optuna
