@@ -10,3 +10,5 @@ altair==4.2.2
 yfinance
 xgboost
 optuna
+requests
+python-dotenv
