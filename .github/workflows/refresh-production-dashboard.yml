@@ -27,7 +27,7 @@ jobs:
 
       - name: Build latest production payload
         env:
-          GEMINI_API_KEY: ${{ AIzaSyAhk2NQb-SI4D2tjFH2zM9sNVdv4nbUwwE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PRODUCTION_SENTIMENT_LOOKBACK_DAYS: "30"
           PRODUCTION_SENTIMENT_LANGUAGES: "english"
           PRODUCTION_SENTIMENT_WINDOW_DAYS: "7"
