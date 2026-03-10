@@ -50,6 +50,7 @@ IMPACT_LABEL_MAP = {
 
 
 def render_metric_cards(items: list[tuple[str, str]]) -> None:
+    column_count = max(1, min(len(items), 5))
     cards_html = "".join(
         f"""
         <div style="background:#f7f7fb;border:1px solid #e7e7ef;border-radius:12px;padding:16px;min-height:96px;">
@@ -61,7 +62,7 @@ def render_metric_cards(items: list[tuple[str, str]]) -> None:
     )
     st.markdown(
         f"""
-        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;">
+        <div style="display:grid;grid-template-columns:repeat({column_count},minmax(0,1fr));gap:12px;">
           {cards_html}
         </div>
         """,
@@ -235,6 +236,7 @@ def build_view_model(state: dict) -> dict:
         raise ValueError("Sheet xgb_latest_prediction masih kosong. Jalankan updater production dulu.")
 
     latest_row = latest_df.iloc[-1]
+    latest_data_ts = pd.to_datetime(latest_row["latest_data_date"], errors="coerce")
     history_df = state["history"].copy()
     history_rows = []
     if not history_df.empty:
@@ -251,13 +253,33 @@ def build_view_model(state: dict) -> dict:
     latest_news_date = None if latest_daily is None else str(latest_daily["news_date"])
     tone_label = "Belum ada news" if latest_daily is None else str(latest_daily["tone_label"])
     dominant_channel = "Belum ada" if latest_daily is None else str(latest_daily["dominant_channel"])
+    latest_news_ts = pd.to_datetime(latest_news_date, errors="coerce") if latest_news_date else pd.NaT
+    news_is_fresh = bool(pd.notna(latest_data_ts) and pd.notna(latest_news_ts) and latest_data_ts.date() == latest_news_ts.date())
+    if latest_daily is None:
+        sentiment_label = "Belum ada news"
+        sentiment_note = "Belum ada news relevan pada refresh sentiment terakhir."
+        sentiment_status = "Kosong"
+    elif news_is_fresh:
+        sentiment_label = tone_label
+        sentiment_note = (
+            f"Sentiment hari ini bersifat {tone_label.lower()} dengan channel utama {dominant_channel.lower()}."
+        )
+        sentiment_status = "Fresh"
+    else:
+        sentiment_label = "Belum ada news hari ini"
+        sentiment_note = (
+            f"Tidak ada news relevan baru untuk {latest_row['latest_data_date']}. "
+            f"Sentiment terakhir {tone_label.lower()} pada {latest_news_date} "
+            f"dengan channel utama {dominant_channel.lower()}."
+        )
+        sentiment_status = "Stale"
 
     delta_pct = float(latest_row["delta_pct"])
     model_signal = str(latest_row.get("signal", "Netral"))
     executive_note = (
         f"XGBoost memberi sinyal {model_signal.lower()} untuk {latest_row['forecast_date']} "
         f"dengan perubahan {delta_pct:+.2f}%. "
-        f"Sentiment terbaru bersifat {tone_label.lower()} dengan channel utama {dominant_channel.lower()}."
+        f"{sentiment_note}"
     )
 
     top_articles_df = state["articles"].copy()
@@ -294,7 +316,7 @@ def build_view_model(state: dict) -> dict:
             "baseline_price_t1": float(latest_row["baseline_price_t1"]),
             "delta_pct": float(latest_row["delta_pct"]),
             "signal": model_signal,
-            "sentiment_label": tone_label,
+            "sentiment_label": sentiment_label,
             "sentiment_score": 0.0 if latest_daily is None else float(latest_daily["market_sentiment_mean"]),
             "headline_note": executive_note,
         },
@@ -316,7 +338,11 @@ def build_view_model(state: dict) -> dict:
         },
         "sentiment": {
             "latest_news_date": latest_news_date,
+            "latest_model_date": str(latest_row["latest_data_date"]),
             "latest_daily": latest_daily,
+            "news_is_fresh": news_is_fresh,
+            "sentiment_status": sentiment_status,
+            "sentiment_note": sentiment_note,
             "recent_daily": daily_df.tail(60).to_dict(orient="records") if not daily_df.empty else [],
             "top_articles": top_articles,
         },
@@ -410,13 +436,15 @@ elif page == "Market Sentiment":
     if latest_daily:
         render_metric_cards(
             [
+                ("Tanggal Acuan Harga", str(sentiment["latest_model_date"])),
                 ("Tanggal News Terbaru", str(sentiment["latest_news_date"])),
-                ("Jumlah Berita", str(int(float(latest_daily["news_count_model"])))),
+                ("Status News", str(sentiment["sentiment_status"])),
                 ("Sentiment Mean", f"{float(latest_daily['market_sentiment_mean']):+.2f}"),
-                ("Channel Utama", str(latest_daily["dominant_channel"])),
-                ("Tone", str(latest_daily["tone_label"])),
+                ("Tone / Channel", f"{latest_daily['tone_label']} / {latest_daily['dominant_channel']}"),
             ]
         )
+        if not sentiment.get("news_is_fresh", False):
+            st.warning(sentiment["sentiment_note"])
     else:
         st.warning("Belum ada news relevan terbaru pada refresh sentiment terakhir.")
 
@@ -437,6 +465,7 @@ elif page == "Data Health":
             ("Latest model date", model["latest_data_date"]),
             ("Forecast date", model["forecast_date"]),
             ("Latest news date", sentiment["latest_news_date"]),
+            ("News freshness", sentiment.get("sentiment_status", "")),
             ("Freshness note", data_health["freshness_note"]),
             ("Pipeline generated_at", latest_status.get("generated_at_utc", "")),
             ("Sentiment status", latest_status.get("sentiment_status", "")),
