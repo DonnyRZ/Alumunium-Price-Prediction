@@ -243,6 +243,231 @@ def _load_history_sheet() -> pd.DataFrame:
     return _empty_history_df()
 
 
+def _merge_history_rows(history_df: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return history_df.copy()
+    new_df = pd.DataFrame(rows)
+    for col in HISTORY_COLUMNS:
+        if col not in new_df.columns:
+            new_df[col] = ""
+    merged = pd.concat([history_df.copy(), new_df[HISTORY_COLUMNS]], ignore_index=True)
+    merged = merged.drop_duplicates(subset=["forecast_date"], keep="last").sort_values("base_date").reset_index(drop=True)
+    return merged
+
+
+def _build_prediction_payload_for_date(
+    frame: pd.DataFrame,
+    labeled_all: pd.DataFrame,
+    decision: dict,
+    summary_rows: list[dict],
+    as_of_date: pd.Timestamp,
+) -> dict:
+    forecast_row = frame[frame["Date"].eq(as_of_date)].dropna(subset=FEATURES + ["Close"]).copy()
+    if forecast_row.empty:
+        raise ValueError(f"Tidak ada row fitur valid untuk tanggal {as_of_date.date().isoformat()}.")
+
+    labeled = labeled_all[labeled_all[f"target_date_t{H}"] <= as_of_date].copy()
+    forecast_year = int(as_of_date.year)
+    valid_year = pick_latest_valid_year(labeled, forecast_year=forecast_year)
+
+    cal_train_start = pd.Timestamp(f"{valid_year - TRAIN_WINDOW_YEARS}-01-01")
+    cal_train_end = pd.Timestamp(f"{valid_year - 1}-12-31")
+    cal_valid_start = pd.Timestamp(f"{valid_year}-01-01")
+    cal_valid_end = pd.Timestamp(f"{valid_year}-12-31")
+
+    cal_train = labeled[
+        (labeled["Date"] >= cal_train_start)
+        & (labeled["Date"] <= cal_train_end)
+        & (labeled[f"target_date_t{H}"] <= cal_train_end)
+    ].copy()
+    cal_valid = labeled[
+        (labeled["Date"] >= cal_valid_start)
+        & (labeled["Date"] <= cal_valid_end)
+        & (labeled[f"target_date_t{H}"] <= cal_valid_end)
+    ].copy()
+    if cal_train.empty or cal_valid.empty:
+        raise ValueError(f"Kalibrasi baseline gagal untuk tanggal {as_of_date.date().isoformat()}.")
+
+    train_mean_ret_cal = float(cal_train[f"target_logret_t{H}"].mean())
+    baselines_valid = build_price_baselines(cal_valid, train_mean_ret_cal, H)
+    locked_baseline_name = min(
+        baselines_valid,
+        key=lambda key: float(np.mean(np.abs(cal_valid[f"target_close_t{H}"].values - baselines_valid[key]))),
+    )
+
+    ytr_cal_corr = (cal_train[f"target_close_t{H}"] - cal_train["Close"]).values
+    yva_cal_corr = (cal_valid[f"target_close_t{H}"] - cal_valid["Close"]).values
+    wtr_cal = build_move_sample_weights(
+        cal_train[f"target_ret_t{H}"].values,
+        MOVE_WEIGHT_MIN,
+        MOVE_WEIGHT_MAX,
+        MOVE_WEIGHT_CLIP_Q,
+        MOVE_WEIGHT_POWER,
+    )
+
+    cal_params = decision["reg_params_used"].copy()
+    cal_params.update({"random_state": SEED, "n_jobs": 1, "early_stopping_rounds": EARLY_STOPPING})
+    cal_model = XGBRegressor(**cal_params)
+    cal_model.fit(
+        cal_train[FEATURES].values,
+        ytr_cal_corr,
+        sample_weight=wtr_cal,
+        eval_set=[(cal_valid[FEATURES].values, yva_cal_corr)],
+        verbose=False,
+    )
+
+    cal_valid_pred_corr = cal_valid["Close"].values + cal_model.predict(cal_valid[FEATURES].values)
+    tau_cal = max(decision["noharm_tau_mult_used"], NOHARM_TAU_MULT_MIN) * robust_scale(ytr_cal_corr)
+    reg_mask_cal = build_regime_mask(
+        cal_train["ret_roll_std_20"].values,
+        cal_valid["ret_roll_std_20"].values,
+        decision["regime_vol_z_used"],
+    )
+    cal_valid_pred_final, _ = apply_regime_noharm_gate(
+        cal_valid["Close"].values, cal_valid_pred_corr, tau_cal, reg_mask_cal
+    )
+    cal_resid = cal_valid[f"target_close_t{H}"].values - cal_valid_pred_final
+    res_q10 = float(np.quantile(cal_resid, INTERVAL_LOW_Q))
+    res_q90 = float(np.quantile(cal_resid, INTERVAL_HIGH_Q))
+
+    final_train_start = pd.Timestamp(f"{as_of_date.year - TRAIN_WINDOW_YEARS}-01-01")
+    final_train = labeled[labeled["Date"] >= final_train_start].copy()
+    if final_train.empty:
+        raise ValueError(f"Training production kosong untuk tanggal {as_of_date.date().isoformat()}.")
+
+    ytr_final_corr = (final_train[f"target_close_t{H}"] - final_train["Close"]).values
+    wtr_final = build_move_sample_weights(
+        final_train[f"target_ret_t{H}"].values,
+        MOVE_WEIGHT_MIN,
+        MOVE_WEIGHT_MAX,
+        MOVE_WEIGHT_CLIP_Q,
+        MOVE_WEIGHT_POWER,
+    )
+    final_params = decision["reg_params_used"].copy()
+    final_params.update({"random_state": SEED, "n_jobs": 1})
+    final_model = XGBRegressor(**final_params)
+    final_model.fit(final_train[FEATURES].values, ytr_final_corr, sample_weight=wtr_final, verbose=False)
+
+    pred_corr = float(forecast_row["Close"].iloc[0] + final_model.predict(forecast_row[FEATURES].values)[0])
+    tau_prod = max(decision["noharm_tau_mult_used"], NOHARM_TAU_MULT_MIN) * robust_scale(ytr_final_corr)
+    reg_mask_prod = build_regime_mask(
+        final_train["ret_roll_std_20"].values,
+        forecast_row["ret_roll_std_20"].values,
+        decision["regime_vol_z_used"],
+    )
+    pred_final, gate_prod = apply_regime_noharm_gate(
+        forecast_row["Close"].values,
+        np.array([pred_corr]),
+        tau_prod,
+        reg_mask_prod,
+    )
+    pred_final = float(pred_final[0])
+    gate_applied = bool(gate_prod[0])
+    regime_active = bool(np.asarray(reg_mask_prod)[0])
+
+    train_mean_ret_final = float(final_train[f"target_logret_t{H}"].mean())
+    forecast_baseline_frame = forecast_row[["Close", "ret_roll_mean_5", "ret_roll_mean_10", "close_mom_5"]].copy()
+    baseline_map = build_price_baselines(forecast_baseline_frame, train_mean_ret_final, H)
+    baseline_pred = float(baseline_map[locked_baseline_name][0])
+
+    pred_p10 = float(pred_final + res_q10)
+    pred_p90 = float(pred_final + res_q90)
+    current_price = float(forecast_row["Close"].iloc[0])
+    delta_abs = pred_final - current_price
+    delta_pct = (delta_abs / current_price) * 100 if current_price else 0.0
+
+    actual_next = forecast_row[f"target_close_t{H}"].iloc[0]
+
+    return {
+        "generated_at_utc": utc_now_iso(),
+        "model_name": decision.get("model_name", "XGBoost H+1"),
+        "data_source": str(DATA_PATH.relative_to(ROOT)),
+        "decision_source": (
+            str(DECISION_PATH.relative_to(ROOT))
+            if DECISION_PATH.exists()
+            else str(PRODUCTION_CONFIG_PATH.relative_to(ROOT))
+        ),
+        "latest_data_date": as_of_date.date().isoformat(),
+        "forecast_date": (as_of_date + BDay(1)).date().isoformat(),
+        "train_window_start": final_train_start.date().isoformat(),
+        "train_rows": int(len(final_train)),
+        "feature_count": len(FEATURES),
+        "feature_names": FEATURES,
+        "locked_baseline_name": locked_baseline_name,
+        "current_price": current_price,
+        "baseline_price_t1": baseline_pred,
+        "pred_price_corr_t1": pred_corr,
+        "pred_price_final_t1": pred_final,
+        "pred_price_p10_t1": pred_p10,
+        "pred_price_p90_t1": pred_p90,
+        "delta_abs": delta_abs,
+        "delta_pct": delta_pct,
+        "signal": "Bullish" if delta_pct > 0 else "Bearish" if delta_pct < 0 else "Netral",
+        "gate_applied": gate_applied,
+        "regime_active": regime_active,
+        "noharm_tau_abs": float(tau_prod),
+        "calibration_valid_year": valid_year,
+        "summary_rows": summary_rows,
+        "production_note": (
+            "Prediksi harian dibuat dari setup XGBoost saat ini. "
+            "Baseline dikunci dari tahun valid terakhir yang lengkap, lalu model dilatih ulang pada jendela terbaru."
+        ),
+        "actual_next_price": None if pd.isna(actual_next) else float(actual_next),
+    }
+
+
+def _backfill_missing_forward_history(
+    frame: pd.DataFrame,
+    labeled_all: pd.DataFrame,
+    history_df: pd.DataFrame,
+    decision: dict,
+    summary_rows: list[dict],
+    latest_live_date: pd.Timestamp,
+) -> pd.DataFrame:
+    if history_df.empty:
+        return history_df
+
+    existing_base_dates = set(pd.to_datetime(history_df["base_date"], errors="coerce").dt.date.dropna())
+    recent_window_start = (latest_live_date - pd.Timedelta(days=120)).date()
+    if not existing_base_dates:
+        return history_df
+
+    historical_candidates = (
+        frame[
+            (frame["Date"].dt.date >= recent_window_start)
+            & (frame["Date"] < latest_live_date)
+            & (~frame["Date"].dt.date.isin(existing_base_dates))
+        ]
+        .dropna(subset=FEATURES + ["Close", f"target_close_t{H}"])
+        .sort_values("Date")
+    )
+    if historical_candidates.empty:
+        return history_df
+
+    new_rows: list[dict] = []
+    for as_of_date in historical_candidates["Date"].tolist():
+        payload = _build_prediction_payload_for_date(frame, labeled_all, decision, summary_rows, pd.Timestamp(as_of_date))
+        new_rows.append(
+            {
+                "base_date": payload["latest_data_date"],
+                "forecast_date": payload["forecast_date"],
+                "current_price": payload["current_price"],
+                "actual_next_price": payload["actual_next_price"],
+                "model_price_t1": payload["pred_price_final_t1"],
+                "baseline_price_t1": payload["baseline_price_t1"],
+                "gate_applied": payload["gate_applied"],
+                "signal": payload["signal"],
+                "generated_at_utc": payload["generated_at_utc"],
+            }
+        )
+
+    if not new_rows:
+        return history_df
+    history_df = _merge_history_rows(history_df, new_rows)
+    overwrite_sheet(history_df, TAB_XGB_HISTORY)
+    return history_df
+
+
 def update_xgb_sheet_outputs(payload: dict) -> list[dict]:
     latest_df = pd.DataFrame(
         [
@@ -334,152 +559,11 @@ def build_xgb_snapshot() -> dict:
     if forecast_rows.empty:
         raise ValueError("Tidak ada row forecast terbaru untuk membangun prediksi production.")
 
-    forecast_row = forecast_rows.sort_values("Date").tail(1).copy()
-    latest_date = pd.Timestamp(forecast_row["Date"].iloc[0])
-    forecast_year = int(latest_date.year)
+    latest_date = pd.Timestamp(forecast_rows.sort_values("Date").tail(1)["Date"].iloc[0])
+    history_df = _load_history_sheet()
+    history_df = _backfill_missing_forward_history(frame, labeled, history_df, decision, summary_rows, latest_date)
 
-    valid_year = pick_latest_valid_year(labeled, forecast_year=forecast_year)
-    cal_train_start = pd.Timestamp(f"{valid_year - TRAIN_WINDOW_YEARS}-01-01")
-    cal_train_end = pd.Timestamp(f"{valid_year - 1}-12-31")
-    cal_valid_start = pd.Timestamp(f"{valid_year}-01-01")
-    cal_valid_end = pd.Timestamp(f"{valid_year}-12-31")
-
-    cal_train = labeled[
-        (labeled["Date"] >= cal_train_start)
-        & (labeled["Date"] <= cal_train_end)
-        & (labeled[f"target_date_t{H}"] <= cal_train_end)
-    ].copy()
-    cal_valid = labeled[
-        (labeled["Date"] >= cal_valid_start)
-        & (labeled["Date"] <= cal_valid_end)
-        & (labeled[f"target_date_t{H}"] <= cal_valid_end)
-    ].copy()
-    if cal_train.empty or cal_valid.empty:
-        raise ValueError("Kalibrasi baseline production gagal karena split train/valid kosong.")
-
-    train_mean_ret_cal = float(cal_train[f"target_logret_t{H}"].mean())
-    baselines_valid = build_price_baselines(cal_valid, train_mean_ret_cal, H)
-    locked_baseline_name = min(
-        baselines_valid,
-        key=lambda key: float(np.mean(np.abs(cal_valid[f"target_close_t{H}"].values - baselines_valid[key]))),
-    )
-
-    ytr_cal_corr = (cal_train[f"target_close_t{H}"] - cal_train["Close"]).values
-    yva_cal_corr = (cal_valid[f"target_close_t{H}"] - cal_valid["Close"]).values
-    wtr_cal = build_move_sample_weights(
-        cal_train[f"target_ret_t{H}"].values,
-        MOVE_WEIGHT_MIN,
-        MOVE_WEIGHT_MAX,
-        MOVE_WEIGHT_CLIP_Q,
-        MOVE_WEIGHT_POWER,
-    )
-
-    cal_params = decision["reg_params_used"].copy()
-    cal_params.update({"random_state": SEED, "n_jobs": 1, "early_stopping_rounds": EARLY_STOPPING})
-    cal_model = XGBRegressor(**cal_params)
-    cal_model.fit(
-        cal_train[FEATURES].values,
-        ytr_cal_corr,
-        sample_weight=wtr_cal,
-        eval_set=[(cal_valid[FEATURES].values, yva_cal_corr)],
-        verbose=False,
-    )
-
-    cal_valid_pred_corr = cal_valid["Close"].values + cal_model.predict(cal_valid[FEATURES].values)
-    tau_cal = max(decision["noharm_tau_mult_used"], NOHARM_TAU_MULT_MIN) * robust_scale(ytr_cal_corr)
-    reg_mask_cal = build_regime_mask(
-        cal_train["ret_roll_std_20"].values,
-        cal_valid["ret_roll_std_20"].values,
-        decision["regime_vol_z_used"],
-    )
-    cal_valid_pred_final, _ = apply_regime_noharm_gate(
-        cal_valid["Close"].values, cal_valid_pred_corr, tau_cal, reg_mask_cal
-    )
-    cal_resid = cal_valid[f"target_close_t{H}"].values - cal_valid_pred_final
-    res_q10 = float(np.quantile(cal_resid, INTERVAL_LOW_Q))
-    res_q90 = float(np.quantile(cal_resid, INTERVAL_HIGH_Q))
-
-    final_train_start = pd.Timestamp(f"{latest_date.year - TRAIN_WINDOW_YEARS}-01-01")
-    final_train = labeled[labeled["Date"] >= final_train_start].copy()
-    if final_train.empty:
-        raise ValueError("Training production kosong setelah filter jendela waktu.")
-
-    ytr_final_corr = (final_train[f"target_close_t{H}"] - final_train["Close"]).values
-    wtr_final = build_move_sample_weights(
-        final_train[f"target_ret_t{H}"].values,
-        MOVE_WEIGHT_MIN,
-        MOVE_WEIGHT_MAX,
-        MOVE_WEIGHT_CLIP_Q,
-        MOVE_WEIGHT_POWER,
-    )
-    final_params = decision["reg_params_used"].copy()
-    final_params.update({"random_state": SEED, "n_jobs": 1})
-    final_model = XGBRegressor(**final_params)
-    final_model.fit(final_train[FEATURES].values, ytr_final_corr, sample_weight=wtr_final, verbose=False)
-
-    pred_corr = float(forecast_row["Close"].iloc[0] + final_model.predict(forecast_row[FEATURES].values)[0])
-    tau_prod = max(decision["noharm_tau_mult_used"], NOHARM_TAU_MULT_MIN) * robust_scale(ytr_final_corr)
-    reg_mask_prod = build_regime_mask(
-        final_train["ret_roll_std_20"].values,
-        forecast_row["ret_roll_std_20"].values,
-        decision["regime_vol_z_used"],
-    )
-    pred_final, gate_prod = apply_regime_noharm_gate(
-        forecast_row["Close"].values,
-        np.array([pred_corr]),
-        tau_prod,
-        reg_mask_prod,
-    )
-    pred_final = float(pred_final[0])
-    gate_applied = bool(gate_prod[0])
-    regime_active = bool(np.asarray(reg_mask_prod)[0])
-
-    train_mean_ret_final = float(final_train[f"target_logret_t{H}"].mean())
-    forecast_baseline_frame = forecast_row[["Close", "ret_roll_mean_5", "ret_roll_mean_10", "close_mom_5"]].copy()
-    baseline_map = build_price_baselines(forecast_baseline_frame, train_mean_ret_final, H)
-    baseline_pred = float(baseline_map[locked_baseline_name][0])
-
-    pred_p10 = float(pred_final + res_q10)
-    pred_p90 = float(pred_final + res_q90)
-    current_price = float(forecast_row["Close"].iloc[0])
-    delta_abs = pred_final - current_price
-    delta_pct = (delta_abs / current_price) * 100 if current_price else 0.0
-
-    payload = {
-        "generated_at_utc": utc_now_iso(),
-        "model_name": decision.get("model_name", "XGBoost H+1"),
-        "data_source": str(DATA_PATH.relative_to(ROOT)),
-        "decision_source": (
-            str(DECISION_PATH.relative_to(ROOT))
-            if DECISION_PATH.exists()
-            else str(PRODUCTION_CONFIG_PATH.relative_to(ROOT))
-        ),
-        "latest_data_date": latest_date.date().isoformat(),
-        "forecast_date": (latest_date + BDay(1)).date().isoformat(),
-        "train_window_start": final_train_start.date().isoformat(),
-        "train_rows": int(len(final_train)),
-        "feature_count": len(FEATURES),
-        "feature_names": FEATURES,
-        "locked_baseline_name": locked_baseline_name,
-        "current_price": current_price,
-        "baseline_price_t1": baseline_pred,
-        "pred_price_corr_t1": pred_corr,
-        "pred_price_final_t1": pred_final,
-        "pred_price_p10_t1": pred_p10,
-        "pred_price_p90_t1": pred_p90,
-        "delta_abs": delta_abs,
-        "delta_pct": delta_pct,
-        "signal": "Bullish" if delta_pct > 0 else "Bearish" if delta_pct < 0 else "Netral",
-        "gate_applied": gate_applied,
-        "regime_active": regime_active,
-        "noharm_tau_abs": float(tau_prod),
-        "calibration_valid_year": valid_year,
-        "summary_rows": summary_rows,
-        "production_note": (
-            "Prediksi harian dibuat dari setup XGBoost saat ini. "
-            "Baseline dikunci dari tahun valid terakhir yang lengkap, lalu model dilatih ulang pada jendela terbaru."
-        ),
-    }
+    payload = _build_prediction_payload_for_date(frame, labeled, decision, summary_rows, latest_date)
     payload["recent_history"] = update_xgb_sheet_outputs(payload)
     return payload
 

@@ -12,12 +12,14 @@ if str(ROOT) not in sys.path:
 from production.gsheet_manager import overwrite_sheet
 from production.pipeline.build_xgb_snapshot import build_xgb_snapshot
 from production.pipeline.common import utc_now_iso
+from production.pipeline.refresh_market_data import refresh_market_data
 from production.pipeline.refresh_sentiment_data import refresh_sentiment_data
 from production.sheet_contract import SPREADSHEET_NAME, TAB_PIPELINE_STATUS
 
 
 def main() -> None:
     generated_at = utc_now_iso()
+    market_refresh = refresh_market_data()
     xgb_payload = build_xgb_snapshot()
     sentiment_status = refresh_sentiment_data()
 
@@ -26,6 +28,9 @@ def main() -> None:
             {
                 "generated_at_utc": generated_at,
                 "spreadsheet_name": SPREADSHEET_NAME,
+                "market_refresh_latest_date": market_refresh.get("latest_date", ""),
+                "market_refresh_raw_rows": market_refresh.get("raw_rows", 0),
+                "market_refresh_processed_rows": market_refresh.get("processed_rows", 0),
                 "xgb_status": "success",
                 "xgb_forecast_date": xgb_payload["forecast_date"],
                 "xgb_signal": xgb_payload["signal"],
@@ -45,6 +50,7 @@ def main() -> None:
 
     print("production spreadsheet state updated")
     print(f"- spreadsheet        : {SPREADSHEET_NAME}")
+    print(f"- market latest date : {market_refresh.get('latest_date', '')}")
     print(f"- xgb forecast date  : {xgb_payload['forecast_date']}")
     print(f"- xgb signal         : {xgb_payload['signal']}")
     print(f"- sentiment status   : {sentiment_status.get('status', 'unknown')}")

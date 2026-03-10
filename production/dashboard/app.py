@@ -120,18 +120,47 @@ def render_history_plot(history: pd.DataFrame) -> None:
         return
     plot_df = history.copy()
     plot_df["base_date"] = pd.to_datetime(plot_df["base_date"], errors="coerce")
-    plot_df = plot_df.sort_values("base_date").tail(40)
+    plot_df["actual_next_price"] = pd.to_numeric(plot_df.get("actual_next_price"), errors="coerce")
+    plot_df["model_price_t1"] = pd.to_numeric(plot_df.get("model_price_t1"), errors="coerce")
+    plot_df = plot_df.sort_values("base_date").tail(60).reset_index(drop=True)
+
+    latest_forecast = plot_df[plot_df["actual_next_price"].isna()].tail(1).copy()
+    history_only = plot_df[plot_df["actual_next_price"].notna()].copy()
+    plot_df["x_pos"] = range(len(plot_df))
+    history_only["x_pos"] = plot_df.loc[history_only.index, "x_pos"]
+    latest_forecast["x_pos"] = plot_df.loc[latest_forecast.index, "x_pos"]
+
     fig, ax = plt.subplots(figsize=(10, 4))
-    if "actual_next_price" in plot_df.columns:
-        ax.plot(plot_df["base_date"], plot_df["actual_next_price"], label="Actual", linewidth=2)
-    ax.plot(plot_df["base_date"], plot_df["model_price_t1"], label="XGBoost", linewidth=2, linestyle="--")
+    if not history_only.empty:
+        ax.plot(history_only["x_pos"], history_only["actual_next_price"], label="Actual", linewidth=2)
+        ax.plot(history_only["x_pos"], history_only["model_price_t1"], label="XGBoost", linewidth=2, linestyle="--")
+    if not latest_forecast.empty:
+        latest_row = latest_forecast.iloc[-1]
+        ax.scatter(
+            [latest_row["x_pos"]],
+            [latest_row["model_price_t1"]],
+            label="Forecast terbaru",
+            s=70,
+            color="#ff7f0e",
+            zorder=4,
+        )
+    tick_step = max(1, len(plot_df) // 8)
+    tick_positions = plot_df["x_pos"].iloc[::tick_step].tolist()
+    if plot_df["x_pos"].iloc[-1] not in tick_positions:
+        tick_positions.append(int(plot_df["x_pos"].iloc[-1]))
+    tick_labels = [
+        plot_df.loc[plot_df["x_pos"] == position, "base_date"].iloc[0].strftime("%Y-%m-%d")
+        for position in tick_positions
+    ]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, rotation=30, ha="right")
     ax.set_xlabel("Tanggal Dasar")
     ax.set_ylabel("Harga")
     ax.legend()
     ax.grid(alpha=0.2)
-    fig.autofmt_xdate()
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
+    st.caption("Sumbu waktu memakai trading day, jadi weekend dan hari libur tidak membuat garis terputus.")
 
 
 def render_sentiment_plot(recent_daily: pd.DataFrame) -> None:
