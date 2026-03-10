@@ -49,6 +49,95 @@ IMPACT_LABEL_MAP = {
 }
 
 
+def _format_number(value: float | int | None, decimals: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):.{decimals}f}"
+
+
+def _format_percent(value: float | int | None, decimals: int = 1) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value) * 100:.{decimals}f}%"
+
+
+def build_model_performance_view(summary_latest: dict) -> dict:
+    if not summary_latest:
+        return {"cards": [], "rows": [], "note": "Ringkasan performa model belum tersedia."}
+
+    baseline_mae = pd.to_numeric(summary_latest.get("mean_baseline_test_mae"), errors="coerce")
+    xgb_mae = pd.to_numeric(summary_latest.get("mean_xgb_noharm_test_mae"), errors="coerce")
+    delta_mae = pd.to_numeric(summary_latest.get("mean_delta_test_mae_noharm"), errors="coerce")
+    win_rate = pd.to_numeric(summary_latest.get("test_win_rate_noharm_strict"), errors="coerce")
+    dir_acc = pd.to_numeric(summary_latest.get("mean_xgb_noharm_test_dir_acc_nonzero"), errors="coerce")
+    cov80 = pd.to_numeric(summary_latest.get("mean_noharm_test_cov80"), errors="coerce")
+
+    if pd.isna(delta_mae):
+        note = "Perbandingan performa XGBoost terhadap model pembanding belum tersedia."
+    elif float(delta_mae) < -0.05:
+        note = (
+            f"Secara rata-rata, XGBoost lebih baik daripada model pembanding pada data uji "
+            f"dengan selisih MAE {abs(float(delta_mae)):.2f}."
+        )
+    elif float(delta_mae) < 0:
+        note = (
+            f"Secara rata-rata, XGBoost sedikit lebih baik daripada model pembanding "
+            f"dengan selisih MAE {abs(float(delta_mae)):.2f}."
+        )
+    elif float(delta_mae) <= 0.05:
+        note = (
+            f"Secara rata-rata, XGBoost hampir sama dengan model pembanding "
+            f"dengan selisih MAE {float(delta_mae):.2f}."
+        )
+    else:
+        note = (
+            f"Secara rata-rata, XGBoost masih lebih lemah dari model pembanding "
+            f"dengan selisih MAE {float(delta_mae):.2f}."
+        )
+
+    cards = [
+        ("MAE XGBoost (test)", _format_number(xgb_mae)),
+        ("MAE Model Pembanding (test)", _format_number(baseline_mae)),
+        ("Selisih MAE", _format_number(delta_mae)),
+        ("Fold test dimenangkan XGBoost", _format_percent(win_rate, 0)),
+        ("Akurasi arah saat harga berubah", _format_percent(dir_acc, 0)),
+    ]
+
+    rows = [
+        {
+            "Metrik": "MAE XGBoost (test)",
+            "Nilai": _format_number(xgb_mae),
+            "Makna": "Semakin kecil, prediksi XGBoost semakin dekat ke harga aktual.",
+        },
+        {
+            "Metrik": "MAE model pembanding (test)",
+            "Nilai": _format_number(baseline_mae),
+            "Makna": "Ini dipakai sebagai acuan untuk menilai apakah XGBoost benar-benar lebih baik.",
+        },
+        {
+            "Metrik": "Selisih MAE XGBoost vs pembanding",
+            "Nilai": _format_number(delta_mae),
+            "Makna": "Nilai negatif berarti XGBoost lebih baik. Nilai positif berarti model pembanding masih unggul.",
+        },
+        {
+            "Metrik": "Fold test dimenangkan XGBoost",
+            "Nilai": _format_percent(win_rate, 0),
+            "Makna": "Semakin tinggi, performa XGBoost semakin konsisten di beberapa periode evaluasi.",
+        },
+        {
+            "Metrik": "Akurasi arah saat harga berubah",
+            "Nilai": _format_percent(dir_acc, 0),
+            "Makna": "Menggambarkan seberapa sering arah naik/turun XGBoost sesuai dengan pergerakan aktual.",
+        },
+        {
+            "Metrik": "Cakupan rentang prediksi 80%",
+            "Nilai": _format_percent(cov80, 1),
+            "Makna": "Menggambarkan apakah rentang bawah-atas prediksi cukup sesuai dengan realisasi harga.",
+        },
+    ]
+    return {"cards": cards, "rows": rows, "note": note}
+
+
 def render_metric_cards(items: list[tuple[str, str]]) -> None:
     column_count = max(1, min(len(items), 5))
     cards_html = "".join(
@@ -244,6 +333,7 @@ def build_view_model(state: dict) -> dict:
         history_rows = history_df.tail(90).to_dict(orient="records")
 
     summary_rows = state["summary"].to_dict(orient="records")
+    summary_latest = state["summary"].iloc[-1].to_dict() if not state["summary"].empty else {}
 
     latest_daily = None
     daily_df = state["daily"]
@@ -334,6 +424,7 @@ def build_view_model(state: dict) -> dict:
             "regime_active": str(latest_row.get("regime_active", "")),
             "locked_baseline_name": str(latest_row.get("locked_baseline_name", "")),
             "summary_rows": summary_rows,
+            "summary_latest": summary_latest,
             "recent_history": history_rows,
         },
         "sentiment": {
@@ -409,26 +500,43 @@ if page == "Executive Summary":
 
 elif page == "Model Detail":
     st.title("Model Detail")
-
-    model_detail = pd.DataFrame(
+    today_view = pd.DataFrame(
         [
-            ("Harga terakhir", model["current_price"]),
-            ("Prediksi XGBoost H+1", model["pred_price_final_t1"]),
-            ("Prediksi baseline H+1", model["baseline_price_t1"]),
-            ("Batas bawah P10", model["pred_price_p10_t1"]),
-            ("Batas atas P90", model["pred_price_p90_t1"]),
-            ("Signal", model["signal"]),
-            ("Gate aktif", model["gate_applied"]),
-            ("Regime aktif", model["regime_active"]),
-            ("Baseline terkunci", model["locked_baseline_name"]),
-        ],
-        columns=["Metrik", "Nilai"],
+            {
+                "Metrik": "Harga terakhir",
+                "Nilai": _format_number(model["current_price"]),
+                "Makna": "Harga penutupan terbaru yang menjadi dasar prediksi hari berikutnya.",
+            },
+            {
+                "Metrik": "Prediksi XGBoost H+1",
+                "Nilai": _format_number(model["pred_price_final_t1"]),
+                "Makna": "Estimasi harga untuk 1 hari perdagangan berikutnya dari model utama.",
+            },
+            {
+                "Metrik": "Prediksi model pembanding H+1",
+                "Nilai": _format_number(model["baseline_price_t1"]),
+                "Makna": "Acuan sederhana untuk mengecek apakah XGBoost memberi nilai tambah.",
+            },
+            {
+                "Metrik": "Rentang prediksi",
+                "Nilai": f"{_format_number(model['pred_price_p10_t1'])} s.d. {_format_number(model['pred_price_p90_t1'])}",
+                "Makna": "Kisaran harga yang masih dianggap masuk akal oleh model untuk prediksi hari berikutnya.",
+            },
+            {
+                "Metrik": "Sinyal hari ini",
+                "Nilai": str(model["signal"]),
+                "Makna": "Ringkasan arah pandangan model untuk prediksi besok.",
+            },
+        ]
     )
-    render_simple_table(model_detail)
+    render_simple_table(today_view)
 
-    st.subheader("Ringkasan Model")
-    summary_rows = pd.DataFrame(model.get("summary_rows", []))
-    render_simple_table(summary_rows)
+    st.subheader("Ringkasan Kinerja Model")
+    performance = build_model_performance_view(model.get("summary_latest", {}))
+    if performance["cards"]:
+        render_metric_cards(performance["cards"])
+    st.info(performance["note"])
+    render_simple_table(pd.DataFrame(performance["rows"]))
 
 elif page == "Market Sentiment":
     st.title("Market Sentiment")
