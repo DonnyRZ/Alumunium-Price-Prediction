@@ -561,5 +561,19 @@ elif page == "Market Sentiment":
 
     top_articles = pd.DataFrame(sentiment.get("top_articles", []))
     if not top_articles.empty:
-        st.subheader("Top Articles")
-        render_simple_table(top_articles)
+        st.subheader("Headline News Terbaru")
+        display_cols = pd.DataFrame(
+            {
+                "Tanggal": top_articles.get("news_date", "-"),
+                "Headline": top_articles.get("title", "-"),
+                "Skor": pd.to_numeric(top_articles.get("market_impact_score"), errors="coerce").map(
+                    lambda value: "-" if pd.isna(value) else f"{value:+.2f}"
+                ),
+                "Arah": top_articles.get("impact_label", "-"),
+                "Topik Utama": top_articles.get("impact_channel", "-"),
+                "Insight AI": top_articles.get("reason_short", "-").fillna("-"),
+            }
+        ).head(5)
+        render_simple_table(display_cols)
+    else:
+        st.info("Detail headline news belum tersedia di sheet artikel sentiment.")
