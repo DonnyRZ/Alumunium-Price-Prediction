@@ -81,6 +81,11 @@ DAILY_COLUMNS = [
     "channel_unclear_count",
 ]
 
+LOCAL_SCORED_SEED_PATHS = [
+    ROOT / "data/news/scored/gdelt_backfill_180d_english_v2_candidate_model_scored.csv",
+    ROOT / "data/news/scored/gdelt_candidate_model_scored_v1.csv",
+]
+
 
 def build_production_settings() -> ProductionSentimentSettings:
     return ProductionSentimentSettings(
@@ -115,6 +120,18 @@ def _empty_scored_df() -> pd.DataFrame:
 
 def _empty_daily_df() -> pd.DataFrame:
     return pd.DataFrame(columns=DAILY_COLUMNS)
+
+
+def _load_local_scored_seed() -> pd.DataFrame:
+    for path in LOCAL_SCORED_SEED_PATHS:
+        if path.exists():
+            try:
+                seed = pd.read_csv(path)
+            except Exception:
+                continue
+            if not seed.empty:
+                return _coerce_scored_sheet(seed)
+    return _empty_scored_df()
 
 
 def _coerce_scored_sheet(df: pd.DataFrame) -> pd.DataFrame:
@@ -247,6 +264,14 @@ def refresh_sentiment_data() -> dict:
 
     existing_scored = _coerce_scored_sheet(read_sheet(TAB_SENTIMENT_ARTICLES))
     existing_daily = _coerce_daily_sheet(read_sheet(TAB_SENTIMENT_DAILY))
+
+    if existing_scored.empty:
+        seed_scored = _load_local_scored_seed()
+        if not seed_scored.empty:
+            seed_daily = aggregate_daily_features(seed_scored, news_settings.confidence_threshold)
+            _write_sentiment_state(seed_scored, seed_daily)
+            existing_scored = seed_scored
+            existing_daily = seed_daily
 
     try:
         candidate_df, fetch_logs = fetch_recent_candidate_news(production_settings)
