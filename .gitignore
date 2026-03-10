@@ -41,3 +41,8 @@ notebooks/data/
 data/news/**
 data/processed\ data/xgb_main_h1_*.csv
 data/processed\ data/xgb_main_h1_*.json
+production/data/**
+!production/data/model/.gitkeep
+!production/data/sentiment/.gitkeep
+!production/data/dashboard/.gitkeep
+!production/data/dashboard/latest_dashboard_payload.json
