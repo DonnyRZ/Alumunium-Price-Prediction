@@ -448,7 +448,7 @@ def build_view_model(state: dict) -> dict:
 with st.sidebar:
     st.title("INALUM Dashboard")
     st.caption("XGBoost H+1 + Market Sentiment Context")
-    page = st.radio("Menu", ["Executive Summary", "Model Detail", "Market Sentiment", "Data Health"])
+    page = st.radio("Menu", ["Executive Summary", "Model Detail", "Market Sentiment"])
     st.markdown("---")
     st.caption("Spreadsheet source")
     st.code(SPREADSHEET_NAME)
@@ -563,22 +563,3 @@ elif page == "Market Sentiment":
     if not top_articles.empty:
         st.subheader("Top Articles")
         render_simple_table(top_articles)
-
-elif page == "Data Health":
-    st.title("Data Health")
-    latest_status = data_health.get("latest_pipeline_status", {})
-    health = pd.DataFrame(
-        [
-            ("Spreadsheet", data_health["spreadsheet_name"]),
-            ("Latest model date", model["latest_data_date"]),
-            ("Forecast date", model["forecast_date"]),
-            ("Latest news date", sentiment["latest_news_date"]),
-            ("News freshness", sentiment.get("sentiment_status", "")),
-            ("Freshness note", data_health["freshness_note"]),
-            ("Pipeline generated_at", latest_status.get("generated_at_utc", "")),
-            ("Sentiment status", latest_status.get("sentiment_status", "")),
-            ("Sentiment newly scored rows", latest_status.get("sentiment_newly_scored_rows", "")),
-        ],
-        columns=["Komponen", "Nilai"],
-    )
-    render_simple_table(health)
