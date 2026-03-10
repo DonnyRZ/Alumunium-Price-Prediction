@@ -1,0 +1,45 @@
+{
+  "model_name": "XGBoost H+1",
+  "model_type": "xgboost_feature_ablation_recent_window_with_move_weights",
+  "selected_params_source": "optuna_best_nonfeasible",
+  "reg_params_used": {
+    "objective": "reg:absoluteerror",
+    "n_estimators": 828,
+    "learning_rate": 0.024432324847863247,
+    "max_depth": 2,
+    "min_child_weight": 6.093333115919448,
+    "subsample": 0.8897252535076494,
+    "colsample_bytree": 0.853491964086341,
+    "gamma": 0.1571808159051671,
+    "reg_alpha": 0.10321739329957737,
+    "reg_lambda": 3.586400014256733
+  },
+  "noharm_tau_mult_used": 0.20107869474948928,
+  "regime_vol_z_used": 1.4730884166538896,
+  "summary_rows": [
+    {
+      "folds": 3,
+      "valid_win_rate_noharm_strict": 0.666667,
+      "test_win_rate_noharm_strict": 1.0,
+      "test_win_rate_corr_strict": 0.0,
+      "mean_delta_valid_mae_noharm": -0.076554,
+      "mean_delta_test_mae_noharm": -0.117002,
+      "worst_delta_test_mae_noharm": -0.083444,
+      "mean_delta_test_mae_corr": 0.275335,
+      "worst_delta_test_mae_corr": 0.478465,
+      "mean_baseline_test_mae": 23.831668,
+      "mean_xgb_noharm_test_mae": 23.714666,
+      "mean_xgb_corr_test_mae": 24.107003,
+      "mean_xgb_noharm_test_smape": 0.009822,
+      "mean_xgb_noharm_test_dir_acc_nonzero": 0.5,
+      "mean_xgb_noharm_test_dir_nonzero_share": 0.00271,
+      "mean_noharm_test_cov80": 0.828529,
+      "mean_noharm_test_width80": 83.791667,
+      "mean_noharm_tau_abs": 6.546202,
+      "mean_regime_active_share_valid": 0.308473,
+      "mean_regime_active_share_test": 0.093518,
+      "mean_gate_applied_share_valid": 0.03367,
+      "mean_gate_applied_share_test": 0.00271
+    }
+  ]
+}

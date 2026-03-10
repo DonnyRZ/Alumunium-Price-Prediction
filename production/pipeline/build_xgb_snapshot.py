@@ -35,6 +35,8 @@ DATA_PATH = ROOT / "data" / "processed data" / "ali_f_event_model_ready_v3.csv"
 DECISION_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_decision.json"
 SUMMARY_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_summary.csv"
 HISTORY_PRED_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_predictions.csv"
+PRODUCTION_CONFIG_PATH = ROOT / "production" / "config" / "xgb_main_production_config.json"
+PREVIOUS_DASHBOARD_PAYLOAD_PATH = ROOT / "production" / "data" / "dashboard" / "latest_dashboard_payload.json"
 
 FEATURES = [
     "dow",
@@ -152,10 +154,47 @@ def pick_latest_valid_year(frame_labeled: pd.DataFrame, forecast_year: int) -> i
     return candidates[-1]
 
 
+def load_production_contract() -> tuple[dict, list[dict]]:
+    if DECISION_PATH.exists():
+        decision = json.loads(DECISION_PATH.read_text())
+    else:
+        decision = json.loads(PRODUCTION_CONFIG_PATH.read_text())
+
+    if SUMMARY_PATH.exists():
+        summary_rows = pd.read_csv(SUMMARY_PATH).to_dict(orient="records")
+    else:
+        summary_rows = decision.get("summary_rows", [])
+    return decision, summary_rows
+
+
+def load_recent_history() -> list[dict]:
+    if HISTORY_PRED_PATH.exists():
+        hist = pd.read_csv(HISTORY_PRED_PATH, parse_dates=["Date"]).sort_values("Date")
+        hist = hist.tail(90).copy()
+        rows = []
+        for _, row in hist.iterrows():
+            rows.append(
+                {
+                    "base_date": pd.Timestamp(row["Date"]).date().isoformat(),
+                    "current_price": float(row["close_t"]),
+                    "actual_next_price": float(row["y_true_price_t1"]),
+                    "model_price_t1": float(row["y_pred_p50_t1"]),
+                    "baseline_price_t1": float(row["baseline_price_t1"]),
+                    "gate_applied": bool(row["gate_applied"]),
+                }
+            )
+        return rows
+
+    if PREVIOUS_DASHBOARD_PAYLOAD_PATH.exists():
+        payload = json.loads(PREVIOUS_DASHBOARD_PAYLOAD_PATH.read_text())
+        return payload.get("model", {}).get("recent_history", [])
+
+    return []
+
+
 def build_xgb_snapshot() -> Path:
     raw = pd.read_csv(DATA_PATH, parse_dates=["Date"])
-    decision = json.loads(DECISION_PATH.read_text())
-    summary_rows = pd.read_csv(SUMMARY_PATH).to_dict(orient="records")
+    decision, summary_rows = load_production_contract()
 
     frame = build_price_frame(raw).sort_values("Date").reset_index(drop=True)
     labeled = frame.dropna(
@@ -276,27 +315,17 @@ def build_xgb_snapshot() -> Path:
     delta_abs = pred_final - current_price
     delta_pct = (delta_abs / current_price) * 100 if current_price else 0.0
 
-    history_rows = []
-    if HISTORY_PRED_PATH.exists():
-        hist = pd.read_csv(HISTORY_PRED_PATH, parse_dates=["Date"]).sort_values("Date")
-        hist = hist.tail(90).copy()
-        for _, row in hist.iterrows():
-            history_rows.append(
-                {
-                    "base_date": pd.Timestamp(row["Date"]).date().isoformat(),
-                    "current_price": float(row["close_t"]),
-                    "actual_next_price": float(row["y_true_price_t1"]),
-                    "model_price_t1": float(row["y_pred_p50_t1"]),
-                    "baseline_price_t1": float(row["baseline_price_t1"]),
-                    "gate_applied": bool(row["gate_applied"]),
-                }
-            )
+    history_rows = load_recent_history()
 
     payload = {
         "generated_at_utc": utc_now_iso(),
-        "model_name": "XGBoost H+1",
+        "model_name": decision.get("model_name", "XGBoost H+1"),
         "data_source": str(DATA_PATH.relative_to(ROOT)),
-        "decision_source": str(DECISION_PATH.relative_to(ROOT)),
+        "decision_source": (
+            str(DECISION_PATH.relative_to(ROOT))
+            if DECISION_PATH.exists()
+            else str(PRODUCTION_CONFIG_PATH.relative_to(ROOT))
+        ),
         "latest_data_date": latest_date.date().isoformat(),
         "forecast_date": (latest_date + BDay(1)).date().isoformat(),
         "train_window_start": final_train_start.date().isoformat(),
