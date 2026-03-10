@@ -9,7 +9,7 @@ jobs:
   refresh-dashboard:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -25,26 +25,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build latest production payload
+      - name: Refresh production spreadsheet state
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PRODUCTION_SENTIMENT_LOOKBACK_DAYS: "30"
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          PRODUCTION_SPREADSHEET_NAME: "Alumunium_Data_Master"
+          PRODUCTION_SENTIMENT_LOOKBACK_DAYS: "7"
           PRODUCTION_SENTIMENT_LANGUAGES: "english"
-          PRODUCTION_SENTIMENT_WINDOW_DAYS: "7"
-          PRODUCTION_SENTIMENT_MAXRECORDS: "25"
-          PRODUCTION_SENTIMENT_RETRIES: "3"
-          PRODUCTION_SENTIMENT_PAUSE_SECONDS: "3"
+          PRODUCTION_SENTIMENT_WINDOW_DAYS: "3"
+          PRODUCTION_SENTIMENT_MAXRECORDS: "15"
+          PRODUCTION_SENTIMENT_RETRIES: "2"
+          PRODUCTION_SENTIMENT_PAUSE_SECONDS: "4"
+          PRODUCTION_SENTIMENT_MAX_NEW_ARTICLES_PER_RUN: "5"
         run: python production/pipeline/run_daily_pipeline.py
-
-      - name: Commit latest dashboard payload
-        run: |
-          if git diff --quiet -- production/data/dashboard/latest_dashboard_payload.json; then
-            echo "No dashboard payload changes to commit."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add production/data/dashboard/latest_dashboard_payload.json
-          git commit -m "chore: refresh production dashboard payload"
-          git push

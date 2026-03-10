@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from production.pipeline.common import MODEL_SNAPSHOT_PATH, utc_now_iso, write_json
+from production.gsheet_manager import overwrite_sheet, read_sheet
+from production.pipeline.common import utc_now_iso
+from production.sheet_contract import TAB_XGB_HISTORY, TAB_XGB_LATEST, TAB_XGB_SUMMARY
 
 
 SEED = 42
@@ -36,7 +38,6 @@ DECISION_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_decision.json"
 SUMMARY_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_summary.csv"
 HISTORY_PRED_PATH = ROOT / "data" / "processed data" / "xgb_main_h1_predictions.csv"
 PRODUCTION_CONFIG_PATH = ROOT / "production" / "config" / "xgb_main_production_config.json"
-PREVIOUS_DASHBOARD_PAYLOAD_PATH = ROOT / "production" / "data" / "dashboard" / "latest_dashboard_payload.json"
 
 FEATURES = [
     "dow",
@@ -52,6 +53,18 @@ FEATURES = [
     "oc_spread_pct",
     "close_mom_5",
     "close_mom_10",
+]
+
+HISTORY_COLUMNS = [
+    "base_date",
+    "forecast_date",
+    "current_price",
+    "actual_next_price",
+    "model_price_t1",
+    "baseline_price_t1",
+    "gate_applied",
+    "signal",
+    "generated_at_utc",
 ]
 
 
@@ -167,32 +180,149 @@ def load_production_contract() -> tuple[dict, list[dict]]:
     return decision, summary_rows
 
 
-def load_recent_history() -> list[dict]:
-    if HISTORY_PRED_PATH.exists():
-        hist = pd.read_csv(HISTORY_PRED_PATH, parse_dates=["Date"]).sort_values("Date")
-        hist = hist.tail(90).copy()
-        rows = []
-        for _, row in hist.iterrows():
-            rows.append(
-                {
-                    "base_date": pd.Timestamp(row["Date"]).date().isoformat(),
-                    "current_price": float(row["close_t"]),
-                    "actual_next_price": float(row["y_true_price_t1"]),
-                    "model_price_t1": float(row["y_pred_p50_t1"]),
-                    "baseline_price_t1": float(row["baseline_price_t1"]),
-                    "gate_applied": bool(row["gate_applied"]),
-                }
-            )
-        return rows
-
-    if PREVIOUS_DASHBOARD_PAYLOAD_PATH.exists():
-        payload = json.loads(PREVIOUS_DASHBOARD_PAYLOAD_PATH.read_text())
-        return payload.get("model", {}).get("recent_history", [])
-
-    return []
+def _empty_history_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=HISTORY_COLUMNS)
 
 
-def build_xgb_snapshot() -> Path:
+def _coerce_history_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return _empty_history_df()
+
+    out = df.copy()
+    for col in ["base_date", "forecast_date", "generated_at_utc"]:
+        if col in out.columns:
+            out[col] = out[col].astype(str)
+    for col in ["current_price", "actual_next_price", "model_price_t1", "baseline_price_t1"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "gate_applied" in out.columns:
+        out["gate_applied"] = out["gate_applied"].astype(str).str.lower().map({"true": True, "false": False})
+
+    for col in HISTORY_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    return out[HISTORY_COLUMNS].copy()
+
+
+def _seed_history_from_local_artifact() -> pd.DataFrame:
+    if not HISTORY_PRED_PATH.exists():
+        return _empty_history_df()
+
+    raw = pd.read_csv(HISTORY_PRED_PATH)
+    if raw.empty:
+        return _empty_history_df()
+
+    seeded = raw.copy()
+    seeded["base_date"] = pd.to_datetime(seeded["Date"]).dt.date.astype(str)
+    seeded["forecast_date"] = (pd.to_datetime(seeded["Date"]) + BDay(1)).dt.date.astype(str)
+    seeded["current_price"] = pd.to_numeric(seeded["close_t"], errors="coerce")
+    seeded["actual_next_price"] = pd.to_numeric(seeded["y_true_price_t1"], errors="coerce")
+    seeded["model_price_t1"] = pd.to_numeric(seeded["y_pred_p50_t1"], errors="coerce")
+    seeded["baseline_price_t1"] = pd.to_numeric(seeded["baseline_price_t1"], errors="coerce")
+    seeded["gate_applied"] = seeded["gate_applied"].fillna(False).astype(bool)
+    seeded["signal"] = np.where(
+        seeded["model_price_t1"] > seeded["current_price"],
+        "Bullish",
+        np.where(seeded["model_price_t1"] < seeded["current_price"], "Bearish", "Netral"),
+    )
+    seeded["generated_at_utc"] = utc_now_iso()
+    seeded = seeded[HISTORY_COLUMNS].drop_duplicates(subset=["forecast_date"], keep="last")
+    seeded = seeded.sort_values("base_date").reset_index(drop=True)
+    return seeded
+
+
+def _load_history_sheet() -> pd.DataFrame:
+    history_df = _coerce_history_sheet(read_sheet(TAB_XGB_HISTORY))
+    if not history_df.empty:
+        return history_df
+
+    seeded = _seed_history_from_local_artifact()
+    if not seeded.empty:
+        overwrite_sheet(seeded, TAB_XGB_HISTORY)
+        return seeded
+    return _empty_history_df()
+
+
+def update_xgb_sheet_outputs(payload: dict) -> list[dict]:
+    latest_df = pd.DataFrame(
+        [
+            {
+                "generated_at_utc": payload["generated_at_utc"],
+                "latest_data_date": payload["latest_data_date"],
+                "forecast_date": payload["forecast_date"],
+                "current_price": payload["current_price"],
+                "pred_price_final_t1": payload["pred_price_final_t1"],
+                "pred_price_corr_t1": payload["pred_price_corr_t1"],
+                "pred_price_p10_t1": payload["pred_price_p10_t1"],
+                "pred_price_p90_t1": payload["pred_price_p90_t1"],
+                "baseline_price_t1": payload["baseline_price_t1"],
+                "locked_baseline_name": payload["locked_baseline_name"],
+                "delta_abs": payload["delta_abs"],
+                "delta_pct": payload["delta_pct"],
+                "signal": payload["signal"],
+                "gate_applied": payload["gate_applied"],
+                "regime_active": payload["regime_active"],
+                "noharm_tau_abs": payload["noharm_tau_abs"],
+                "train_rows": payload["train_rows"],
+                "feature_count": payload["feature_count"],
+            }
+        ]
+    )
+    overwrite_sheet(latest_df, TAB_XGB_LATEST)
+
+    summary_df = pd.DataFrame(payload.get("summary_rows", []))
+    overwrite_sheet(summary_df, TAB_XGB_SUMMARY)
+
+    history_df = _load_history_sheet()
+    latest_data_date = str(payload["latest_data_date"])
+    forecast_date = str(payload["forecast_date"])
+    current_price = float(payload["current_price"])
+
+    if not history_df.empty and "forecast_date" in history_df.columns:
+        mask_actual = history_df["forecast_date"].astype(str).eq(latest_data_date)
+        if mask_actual.any():
+            history_df.loc[mask_actual, "actual_next_price"] = current_price
+
+    new_row = pd.DataFrame(
+        [
+            {
+                "base_date": latest_data_date,
+                "forecast_date": forecast_date,
+                "current_price": current_price,
+                "actual_next_price": None,
+                "model_price_t1": float(payload["pred_price_final_t1"]),
+                "baseline_price_t1": float(payload["baseline_price_t1"]),
+                "gate_applied": bool(payload["gate_applied"]),
+                "signal": str(payload["signal"]),
+                "generated_at_utc": payload["generated_at_utc"],
+            }
+        ]
+    )
+    history_df = pd.concat([history_df, new_row], ignore_index=True)
+    history_df = history_df.drop_duplicates(subset=["forecast_date"], keep="last").sort_values("base_date").reset_index(
+        drop=True
+    )
+    overwrite_sheet(history_df, TAB_XGB_HISTORY)
+
+    recent = history_df.tail(90).copy()
+    history_rows = []
+    for _, row in recent.iterrows():
+        actual_val = row["actual_next_price"]
+        history_rows.append(
+            {
+                "base_date": str(row["base_date"]),
+                "forecast_date": str(row["forecast_date"]),
+                "current_price": None if pd.isna(row["current_price"]) else float(row["current_price"]),
+                "actual_next_price": None if pd.isna(actual_val) else float(actual_val),
+                "model_price_t1": None if pd.isna(row["model_price_t1"]) else float(row["model_price_t1"]),
+                "baseline_price_t1": None if pd.isna(row["baseline_price_t1"]) else float(row["baseline_price_t1"]),
+                "gate_applied": bool(row["gate_applied"]) if pd.notna(row["gate_applied"]) else False,
+            }
+        )
+    return history_rows
+
+
+def build_xgb_snapshot() -> dict:
     raw = pd.read_csv(DATA_PATH, parse_dates=["Date"])
     decision, summary_rows = load_production_contract()
 
@@ -315,8 +445,6 @@ def build_xgb_snapshot() -> Path:
     delta_abs = pred_final - current_price
     delta_pct = (delta_abs / current_price) * 100 if current_price else 0.0
 
-    history_rows = load_recent_history()
-
     payload = {
         "generated_at_utc": utc_now_iso(),
         "model_name": decision.get("model_name", "XGBoost H+1"),
@@ -347,15 +475,16 @@ def build_xgb_snapshot() -> Path:
         "noharm_tau_abs": float(tau_prod),
         "calibration_valid_year": valid_year,
         "summary_rows": summary_rows,
-        "recent_history": history_rows,
         "production_note": (
             "Prediksi harian dibuat dari setup XGBoost saat ini. "
             "Baseline dikunci dari tahun valid terakhir yang lengkap, lalu model dilatih ulang pada jendela terbaru."
         ),
     }
-    return write_json(payload, MODEL_SNAPSHOT_PATH)
+    payload["recent_history"] = update_xgb_sheet_outputs(payload)
+    return payload
 
 
 if __name__ == "__main__":
     out = build_xgb_snapshot()
-    print(f"saved: {out}")
+    print("xgb production state updated to spreadsheet")
+    print(out["forecast_date"], out["pred_price_final_t1"])

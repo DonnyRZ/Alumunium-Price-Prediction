@@ -1,85 +1,107 @@
 # Production
 
-Folder ini adalah area kerja **production** untuk dashboard pengambilan keputusan.
+Folder ini adalah area kerja **production** untuk dashboard pengambilan keputusan INALUM.
 
-Tujuannya sederhana:
+## Prinsip utama
 
-- memisahkan file production dari notebook/eksperimen,
-- menyediakan **single source of truth** untuk dashboard,
-- dan menghindari munculnya banyak file output baru setiap kali update.
+- **XGBoost H+1** adalah model utama.
+- **Sentiment** dipakai sebagai konteks pasar harian.
+- **Google Sheets** adalah source of truth production.
+- **Streamlit** hanya membaca state production, bukan menjalankan ETL berat saat dibuka.
 
-## Struktur
+Spreadsheet production yang dipakai:
+
+- `Alumunium_Data_Master`
+
+## Struktur production
 
 - `production/pipeline/`
-  - script untuk membentuk snapshot production
+  - updater harian untuk model dan sentiment
 - `production/dashboard/`
   - aplikasi Streamlit
-- `production/data/model/`
-  - snapshot model terbaru
-- `production/data/sentiment/`
-  - data sentiment terbaru dan snapshot sentiment
-- `production/data/dashboard/`
-  - payload final yang dibaca dashboard
+- `production/config/`
+  - kontrak/config production yang ikut repo
+- `production/gsheet_manager.py`
+  - connector Google Sheets
+- `production/sheet_contract.py`
+  - daftar nama tab spreadsheet
 
-## Prinsip output
+## Tab spreadsheet yang dipakai
 
-Output production selalu ditulis ke path yang tetap:
+- `xgb_latest_prediction`
+  - snapshot 1 row prediksi XGBoost terbaru
+- `xgb_prediction_history`
+  - histori prediksi harian untuk chart dashboard
+- `xgb_model_summary`
+  - ringkasan metrik model
+- `sentiment_articles_scored`
+  - cache artikel yang sudah discore
+- `sentiment_daily`
+  - agregasi sentiment harian
+- `pipeline_status`
+  - status updater harian terakhir
 
-- `production/data/model/latest_snapshot.json`
-- `production/data/sentiment/latest_articles.csv`
-- `production/data/sentiment/latest_daily.csv`
-- `production/data/sentiment/latest_snapshot.json`
-- `production/data/dashboard/latest_dashboard_payload.json`
+## Cara kerja production
 
-Jadi tidak ada file versi baru yang menumpuk setiap update.
+### 1. GitHub Actions / updater harian
 
-## Cara pakai
-
-Bangun snapshot terbaru:
+Menjalankan:
 
 ```bash
 .venv/bin/python production/pipeline/run_daily_pipeline.py
 ```
 
-Yang dilakukan pipeline harian:
+Yang dilakukan updater:
 
 - membangun prediksi `H+1` XGBoost terbaru,
-- refresh berita recent window dan score artikel baru dengan Gemini,
-- membangun agregasi sentiment harian terbaru,
-- lalu menulis satu payload final untuk dashboard.
+- menulis latest prediction + history ke spreadsheet,
+- fetch recent news,
+- score **hanya artikel baru** dengan Gemini,
+- update agregasi sentiment harian,
+- menulis status run terakhir ke spreadsheet.
 
-Jalankan dashboard:
+### 2. Streamlit Cloud
 
-```bash
-.venv/bin/streamlit run production/dashboard/app.py
+Entry point:
+
+```text
+production/dashboard/app.py
 ```
 
-## Deployment yang disarankan
+Dashboard membaca langsung dari spreadsheet production.
 
-Untuk deployment ke **Streamlit Cloud**, gunakan pendekatan ini:
+## Secret yang dibutuhkan
 
-- **GitHub Actions** menjalankan `production/pipeline/run_daily_pipeline.py`
-- workflow hanya meng-commit file final:
-  - `production/data/dashboard/latest_dashboard_payload.json`
-- **Streamlit Cloud** hanya membaca file payload final itu
-- app entrypoint di Streamlit Cloud: `production/dashboard/app.py`
+### GitHub Actions
 
-Dengan pendekatan ini:
+- `GEMINI_API_KEY`
+- `GCP_SERVICE_ACCOUNT_JSON`
 
-- dashboard tidak perlu menjalankan training/fetch/scoring saat dibuka,
-- secret `GEMINI_API_KEY` cukup disimpan di GitHub Actions,
-- dan repo tetap rapi karena file yang dipush hanya payload final terbaru.
+### Streamlit Cloud
 
-Workflow harian sudah disiapkan di:
+Karena dashboard membaca spreadsheet langsung, Streamlit Cloud juga perlu:
 
-- `.github/workflows/refresh-production-dashboard.yml`
+- `GCP_SERVICE_ACCOUNT_JSON`
 
-Runtime Python untuk Streamlit Cloud juga sudah dikunci di:
+Gunakan isi JSON service account mentah sebagai secret/string.
 
-- `runtime.txt`
+## Catatan implementasi
 
-## Catatan
+- `service_account_key.json` boleh dipakai lokal, tapi **jangan di-commit**.
+- Workflow harian sudah disiapkan di:
+  - `.github/workflows/refresh-production-dashboard.yml`
+- Update sentiment harian dibuat **incremental** agar tidak scoring ulang artikel lama setiap run.
+- Jika refresh sentiment bermasalah, state lama di spreadsheet tetap dipakai.
 
-- Model utama yang dipakai saat ini adalah **XGBoost H+1**
-- Sentiment dipakai sebagai **konteks pasar**
-- Prophet dan SARIMAX masih di luar scope production saat ini
+## Status scope
+
+Scope production saat ini:
+
+- XGBoost `H+1`
+- sentiment context
+
+Masih di luar scope:
+
+- Prophet
+- SARIMAX
+- ensemble multi-model

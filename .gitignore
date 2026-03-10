@@ -10,43 +10,70 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+*.ipynb
 
 # Virtual environments
 .venv/
 venv/
 ENV/
+env/
 
 # Jupyter
-*.ipynb_checkpoints
+.ipynb_checkpoints/
+.jupyter/
 
 # Environment files
 .env
 .env.*
 !.env.example
+service_account_key.json
+*.pem
+*.key
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
 
 # Logs & outputs
 *.log
 logs/
 outputs/
 results/
+artifacts/
 
 # Data artifacts
 notebooks/data/
 data/news/**
-data/processed\ data/xgb_main_h1_*.csv
-data/processed\ data/xgb_main_h1_*.json
+data/raw\ data/**
+data/processed\ data/**
 production/data/**
-!production/data/
-!production/data/dashboard/
-!production/data/model/
-!production/data/sentiment/
-!production/data/model/.gitkeep
-!production/data/sentiment/.gitkeep
-!production/data/dashboard/.gitkeep
-!production/data/dashboard/latest_dashboard_payload.json
+
+# ML models & caches
+*.pkl
+*.joblib
+*.h5
+*.pth
+*.pt
+*.onnx
+model_cache/
+.mlflow/
+
+# Coverage & testing
+htmlcov/
+.coverage
+coverage.xml
+.tox/
+.nox/
+
+# Build
+build/
+dist/
+*.spec
