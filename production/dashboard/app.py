@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -12,159 +13,119 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from production.gsheet_manager import read_sheet
+from production.pipeline.common import action_label_id
 from production.sheet_contract import (
     SPREADSHEET_NAME,
-    TAB_PIPELINE_STATUS,
-    TAB_SENTIMENT_ARTICLES,
-    TAB_SENTIMENT_DAILY,
-    TAB_XGB_HISTORY,
-    TAB_XGB_LATEST,
-    TAB_XGB_SUMMARY,
+    TAB_ACCOUNT_PRIORITY_QUEUE,
+    TAB_AI_BRIEF_LATEST,
+    TAB_ARTICLES_SCORED,
+    TAB_MARKET_CONTEXT_DAILY,
+    TAB_MARKETING_PLAYBOOK,
+    TAB_QUOTE_DECISION_LOG,
+    TAB_RUN_STATUS,
+    TAB_SIGNAL_HISTORY,
+    TAB_SIGNAL_LATEST,
+    TAB_SIGNAL_METRICS,
 )
 
 
 st.set_page_config(
-    page_title="INALUM Aluminium Dashboard",
-    page_icon="📈",
+    page_title="INALUM Marketing Signal Dashboard",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+LOCAL_SIGNAL_JSON = ROOT / "production" / "data" / "model" / "signal_latest_snapshot.json"
+LOCAL_SIGNAL_HISTORY_CSV = ROOT / "production" / "data" / "model" / "signal_history_snapshot.csv"
+LOCAL_SIGNAL_METRICS_CSV = ROOT / "production" / "data" / "model" / "signal_metrics_snapshot.csv"
+LOCAL_AI_BRIEF_JSON = ROOT / "production" / "data" / "dashboard" / "ai_market_brief_latest.json"
 
-CHANNEL_MAP = {
-    "price": "Harga pasar",
-    "supply": "Pasokan",
-    "policy": "Kebijakan",
-    "logistics": "Logistik",
-    "inventory": "Persediaan",
-    "demand": "Permintaan",
-    "macro": "Makro",
-    "unclear": "Belum jelas",
-}
 
-IMPACT_LABEL_MAP = {
-    "bullish": "Cenderung naik",
-    "bearish": "Cenderung turun",
-    "neutral": "Netral",
+ACTION_STYLE = {
+    "ignore": {"label": "Abaikan", "accent": "#6B7280", "bg": "#F3F4F6"},
+    "watch": {"label": "Pantau", "accent": "#C67A00", "bg": "#FFF7E6"},
+    "act": {"label": "Tindak", "accent": "#A64600", "bg": "#FFF0E8"},
 }
 
 
-def _format_number(value: float | int | None, decimals: int = 2) -> str:
-    if value is None or pd.isna(value):
-        return "-"
-    return f"{float(value):.{decimals}f}"
-
-
-def _format_percent(value: float | int | None, decimals: int = 1) -> str:
-    if value is None or pd.isna(value):
-        return "-"
-    return f"{float(value) * 100:.{decimals}f}%"
-
-
-def build_model_performance_view(summary_latest: dict) -> dict:
-    if not summary_latest:
-        return {"cards": [], "rows": [], "note": "Ringkasan performa model belum tersedia."}
-
-    baseline_mae = pd.to_numeric(summary_latest.get("mean_baseline_test_mae"), errors="coerce")
-    xgb_mae = pd.to_numeric(summary_latest.get("mean_xgb_noharm_test_mae"), errors="coerce")
-    delta_mae = pd.to_numeric(summary_latest.get("mean_delta_test_mae_noharm"), errors="coerce")
-    win_rate = pd.to_numeric(summary_latest.get("test_win_rate_noharm_strict"), errors="coerce")
-    dir_acc = pd.to_numeric(summary_latest.get("mean_xgb_noharm_test_dir_acc_nonzero"), errors="coerce")
-    cov80 = pd.to_numeric(summary_latest.get("mean_noharm_test_cov80"), errors="coerce")
-
-    if pd.isna(delta_mae):
-        note = "Perbandingan performa XGBoost terhadap model pembanding belum tersedia."
-    elif float(delta_mae) < -0.05:
-        note = (
-            f"Secara rata-rata, XGBoost lebih baik daripada model pembanding pada data uji "
-            f"dengan selisih MAE {abs(float(delta_mae)):.2f}."
-        )
-    elif float(delta_mae) < 0:
-        note = (
-            f"Secara rata-rata, XGBoost sedikit lebih baik daripada model pembanding "
-            f"dengan selisih MAE {abs(float(delta_mae)):.2f}."
-        )
-    elif float(delta_mae) <= 0.05:
-        note = (
-            f"Secara rata-rata, XGBoost hampir sama dengan model pembanding "
-            f"dengan selisih MAE {float(delta_mae):.2f}."
-        )
-    else:
-        note = (
-            f"Secara rata-rata, XGBoost masih lebih lemah dari model pembanding "
-            f"dengan selisih MAE {float(delta_mae):.2f}."
-        )
-
-    cards = [
-        ("MAE XGBoost (test)", _format_number(xgb_mae)),
-        ("MAE Model Pembanding (test)", _format_number(baseline_mae)),
-        ("Selisih MAE", _format_number(delta_mae)),
-        ("Fold test dimenangkan XGBoost", _format_percent(win_rate, 0)),
-        ("Akurasi arah saat harga berubah", _format_percent(dir_acc, 0)),
-    ]
-
-    rows = [
-        {
-            "Metrik": "MAE XGBoost (test)",
-            "Nilai": _format_number(xgb_mae),
-            "Makna": "Semakin kecil, prediksi XGBoost semakin dekat ke harga aktual.",
-        },
-        {
-            "Metrik": "MAE model pembanding (test)",
-            "Nilai": _format_number(baseline_mae),
-            "Makna": "Ini dipakai sebagai acuan untuk menilai apakah XGBoost benar-benar lebih baik.",
-        },
-        {
-            "Metrik": "Selisih MAE XGBoost vs pembanding",
-            "Nilai": _format_number(delta_mae),
-            "Makna": "Nilai negatif berarti XGBoost lebih baik. Nilai positif berarti model pembanding masih unggul.",
-        },
-        {
-            "Metrik": "Fold test dimenangkan XGBoost",
-            "Nilai": _format_percent(win_rate, 0),
-            "Makna": "Semakin tinggi, performa XGBoost semakin konsisten di beberapa periode evaluasi.",
-        },
-        {
-            "Metrik": "Akurasi arah saat harga berubah",
-            "Nilai": _format_percent(dir_acc, 0),
-            "Makna": "Menggambarkan seberapa sering arah naik/turun XGBoost sesuai dengan pergerakan aktual.",
-        },
-        {
-            "Metrik": "Cakupan rentang prediksi 80%",
-            "Nilai": _format_percent(cov80, 1),
-            "Makna": "Menggambarkan apakah rentang bawah-atas prediksi cukup sesuai dengan realisasi harga.",
-        },
-    ]
-    return {"cards": cards, "rows": rows, "note": note}
-
-
-def render_metric_cards(items: list[tuple[str, str]]) -> None:
-    column_count = max(1, min(len(items), 5))
-    cards_html = "".join(
-        f"""
-        <div style="background:#f7f7fb;border:1px solid #e7e7ef;border-radius:12px;padding:16px;min-height:96px;">
-          <div style="font-size:0.9rem;color:#666;margin-bottom:8px;">{label}</div>
-          <div style="font-size:1.35rem;font-weight:700;color:#222;line-height:1.3;">{value}</div>
-        </div>
-        """
-        for label, value in items
-    )
+def _apply_theme() -> None:
     st.markdown(
-        f"""
-        <div style="display:grid;grid-template-columns:repeat({column_count},minmax(0,1fr));gap:12px;">
-          {cards_html}
-        </div>
+        """
+        <style>
+        :root {
+          --paper: #F7F4ED;
+          --ink: #1E1B16;
+          --muted: #6F6A61;
+          --line: #E7E0D4;
+          --brand: #A64600;
+          --brand-soft: #FFF0E8;
+          --olive: #53624E;
+        }
+        .stApp {
+          background:
+            radial-gradient(circle at top left, rgba(166,70,0,0.08), transparent 22%),
+            radial-gradient(circle at top right, rgba(83,98,78,0.09), transparent 20%),
+            linear-gradient(180deg, #FAF8F2 0%, #F3EEE4 100%);
+        }
+        .hero-card, .soft-card {
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          padding: 18px 20px;
+          background: rgba(255,255,255,0.72);
+          box-shadow: 0 10px 35px rgba(30,27,22,0.05);
+        }
+        .hero-title {
+          font-size: 0.82rem;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--muted);
+          margin-bottom: 10px;
+        }
+        .hero-value {
+          font-size: 2rem;
+          font-weight: 800;
+          line-height: 1.1;
+          color: var(--ink);
+        }
+        .hero-sub {
+          margin-top: 8px;
+          color: var(--muted);
+          font-size: 0.95rem;
+        }
+        .badge {
+          display: inline-block;
+          padding: 6px 10px;
+          border-radius: 999px;
+          font-size: 0.83rem;
+          font-weight: 700;
+        }
+        .section-note {
+          color: var(--muted);
+          font-size: 0.95rem;
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_simple_table(df: pd.DataFrame) -> None:
-    if df.empty:
-        st.info("Belum ada data untuk ditampilkan.")
-        return
-    html = df.to_html(index=False, escape=False)
-    st.markdown(f'<div style="overflow-x:auto;">{html}</div>', unsafe_allow_html=True)
+def _format_number(value: float | int | str | None, decimals: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    try:
+        return f"{float(value):.{decimals}f}"
+    except Exception:
+        return str(value)
+
+
+def _format_percent(value: float | int | str | None, decimals: int = 1) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    try:
+        return f"{float(value) * 100:.{decimals}f}%"
+    except Exception:
+        return str(value)
 
 
 def _to_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -175,97 +136,107 @@ def _to_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return out
 
 
-def _dominant_channel(row: pd.Series) -> str:
-    mapping = {
-        "channel_price_count": "Harga pasar",
-        "channel_supply_count": "Pasokan",
-        "channel_policy_count": "Kebijakan",
-        "channel_logistics_count": "Logistik",
-        "channel_inventory_count": "Persediaan",
-        "channel_demand_count": "Permintaan",
-        "channel_macro_count": "Makro",
-        "channel_unclear_count": "Belum jelas",
-    }
-    available = [col for col in mapping if col in row.index]
-    if not available:
-        return "Belum jelas"
-    numeric = pd.to_numeric(pd.Series({col: row[col] for col in available}), errors="coerce").fillna(0.0)
-    if float(numeric.sum()) <= 0:
-        return "Belum jelas"
-    return mapping[str(numeric.idxmax())]
-
-
-def _tone_label(score: float | None) -> str:
+def _sentiment_label(score: float | None) -> str:
     if score is None or pd.isna(score):
         return "Belum ada news"
     if score >= 0.20:
-        return "Positif"
+        return "News cenderung positif"
     if score <= -0.20:
-        return "Negatif"
-    return "Netral"
+        return "News cenderung negatif"
+    return "News cenderung netral"
 
 
-def render_history_plot(history: pd.DataFrame) -> None:
-    if history.empty:
+def _action_badge(action_level: str) -> str:
+    style = ACTION_STYLE.get(str(action_level).strip().lower(), ACTION_STYLE["watch"])
+    return (
+        f"<span class='badge' style='background:{style['bg']};color:{style['accent']};"
+        f"border:1px solid {style['accent']}33'>{style['label']}</span>"
+    )
+
+
+def _split_talking_points(raw: str | None) -> list[str]:
+    value = (raw or "").strip()
+    if not value:
+        return []
+    return [item.strip() for item in value.split("|") if item.strip()]
+
+
+def render_metric_cards(items: list[tuple[str, str]]) -> None:
+    columns = st.columns(len(items))
+    for column, (label, value) in zip(columns, items):
+        with column:
+            st.markdown(
+                f"""
+                <div class="soft-card">
+                  <div class="hero-title">{label}</div>
+                  <div class="hero-value" style="font-size:1.35rem;">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_dataframe(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.info("Belum ada data untuk ditampilkan.")
         return
-    plot_df = history.copy()
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_signal_history(signal_history: pd.DataFrame) -> None:
+    if signal_history.empty:
+        st.info("Histori signal belum tersedia.")
+        return
+
+    plot_df = signal_history.copy()
     plot_df["base_date"] = pd.to_datetime(plot_df["base_date"], errors="coerce")
-    plot_df["actual_next_price"] = pd.to_numeric(plot_df.get("actual_next_price"), errors="coerce")
-    plot_df["model_price_t1"] = pd.to_numeric(plot_df.get("model_price_t1"), errors="coerce")
-    plot_df = plot_df.sort_values("base_date").tail(60).reset_index(drop=True)
+    plot_df["probability_action"] = pd.to_numeric(plot_df["probability_action"], errors="coerce")
+    plot_df["actual_abs_return"] = pd.to_numeric(plot_df["actual_abs_return"], errors="coerce")
+    plot_df = plot_df.sort_values("base_date").tail(36)
 
-    latest_forecast = plot_df[plot_df["actual_next_price"].isna()].tail(1).copy()
-    history_only = plot_df[plot_df["actual_next_price"].notna()].copy()
-    plot_df["x_pos"] = range(len(plot_df))
-    history_only["x_pos"] = plot_df.loc[history_only.index, "x_pos"]
-    latest_forecast["x_pos"] = plot_df.loc[latest_forecast.index, "x_pos"]
+    fig, ax1 = plt.subplots(figsize=(11, 4.8))
+    ax1.axhspan(0.00, 0.50, color="#F3F4F6", alpha=0.9)
+    ax1.axhspan(0.50, 0.65, color="#FFF7E6", alpha=0.9)
+    ax1.axhspan(0.65, 1.00, color="#FFF0E8", alpha=0.9)
+    ax1.plot(plot_df["base_date"], plot_df["probability_action"], color="#A64600", linewidth=2.2, label="Probability action")
+    ax1.axhline(0.50, color="#6B7280", linestyle="--", linewidth=1.1, label="Threshold 0.50")
+    ax1.axhline(0.65, color="#C67A00", linestyle=":", linewidth=1.2, label="Threshold 0.65")
+    ax1.set_ylim(0, 1.02)
+    ax1.set_ylabel("Probability")
+    ax1.set_title("Perjalanan Signal 5 Hari Terakhir")
+    ax1.grid(alpha=0.18)
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    if not history_only.empty:
-        ax.plot(history_only["x_pos"], history_only["actual_next_price"], label="Actual", linewidth=2)
-        ax.plot(history_only["x_pos"], history_only["model_price_t1"], label="XGBoost", linewidth=2, linestyle="--")
-    if not latest_forecast.empty:
-        latest_row = latest_forecast.iloc[-1]
-        ax.scatter(
-            [latest_row["x_pos"]],
-            [latest_row["model_price_t1"]],
-            label="Forecast terbaru",
-            s=70,
-            color="#ff7f0e",
-            zorder=4,
-        )
-    tick_step = max(1, len(plot_df) // 8)
-    tick_positions = plot_df["x_pos"].iloc[::tick_step].tolist()
-    if plot_df["x_pos"].iloc[-1] not in tick_positions:
-        tick_positions.append(int(plot_df["x_pos"].iloc[-1]))
-    tick_labels = [
-        plot_df.loc[plot_df["x_pos"] == position, "base_date"].iloc[0].strftime("%Y-%m-%d")
-        for position in tick_positions
-    ]
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=30, ha="right")
-    ax.set_xlabel("Tanggal Dasar")
-    ax.set_ylabel("Harga")
-    ax.legend()
-    ax.grid(alpha=0.2)
+    ax2 = ax1.twinx()
+    ax2.bar(plot_df["base_date"], plot_df["actual_abs_return"], width=3.5, alpha=0.12, color="#53624E", label="Actual |return|")
+    ax2.set_ylabel("|Return| aktual")
+    fig.autofmt_xdate()
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
-    st.caption("Sumbu waktu memakai trading day, jadi weekend dan hari libur tidak membuat garis terputus.")
+    st.caption("Area abu-abu = ignore, kuning = watch, oranye = act.")
 
 
-def render_sentiment_plot(recent_daily: pd.DataFrame) -> None:
-    if recent_daily.empty:
+def render_sentiment_plot(market_context: pd.DataFrame) -> None:
+    if market_context.empty:
+        st.info("Konteks news harian belum tersedia.")
         return
-    recent_daily = recent_daily.copy()
-    recent_daily["news_date"] = pd.to_datetime(recent_daily["news_date"], errors="coerce")
-    recent_daily = recent_daily.sort_values("news_date").tail(30)
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-    ax1.plot(recent_daily["news_date"], recent_daily["market_sentiment_mean"], label="Sentiment Mean", linewidth=2)
-    ax1.set_ylabel("Sentiment")
-    ax1.grid(alpha=0.2)
+
+    plot_df = market_context.copy()
+    plot_df["news_date"] = pd.to_datetime(plot_df["news_date"], errors="coerce")
+    plot_df["market_sentiment_mean"] = pd.to_numeric(plot_df["market_sentiment_mean"], errors="coerce")
+    plot_df["news_count_model"] = pd.to_numeric(plot_df["news_count_model"], errors="coerce")
+    plot_df = plot_df.sort_values("news_date").tail(45)
+
+    fig, ax1 = plt.subplots(figsize=(11, 4.5))
+    ax1.plot(plot_df["news_date"], plot_df["market_sentiment_mean"], color="#53624E", linewidth=2.0, label="Sentiment mean")
+    ax1.axhline(0.20, color="#A64600", linestyle="--", linewidth=1)
+    ax1.axhline(-0.20, color="#A64600", linestyle="--", linewidth=1)
+    ax1.set_ylabel("Skor sentiment")
+    ax1.set_title("Konteks News Harian")
+    ax1.grid(alpha=0.18)
+
     ax2 = ax1.twinx()
-    ax2.bar(recent_daily["news_date"], recent_daily["news_count_model"], alpha=0.2, label="News Count")
-    ax2.set_ylabel("News Count")
+    ax2.bar(plot_df["news_date"], plot_df["news_count_model"], alpha=0.18, color="#C67A00", label="News count")
+    ax2.set_ylabel("Jumlah berita")
     fig.autofmt_xdate()
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
@@ -273,307 +244,351 @@ def render_sentiment_plot(recent_daily: pd.DataFrame) -> None:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_production_state() -> dict:
-    latest_df = read_sheet(TAB_XGB_LATEST)
-    history_df = read_sheet(TAB_XGB_HISTORY)
-    summary_df = read_sheet(TAB_XGB_SUMMARY)
-    articles_df = read_sheet(TAB_SENTIMENT_ARTICLES)
-    daily_df = read_sheet(TAB_SENTIMENT_DAILY)
-    status_df = read_sheet(TAB_PIPELINE_STATUS)
+    signal_latest = read_sheet(TAB_SIGNAL_LATEST)
+    signal_history = read_sheet(TAB_SIGNAL_HISTORY)
+    signal_metrics = read_sheet(TAB_SIGNAL_METRICS)
+    market_context = read_sheet(TAB_MARKET_CONTEXT_DAILY)
+    articles = read_sheet(TAB_ARTICLES_SCORED)
+    ai_brief = read_sheet(TAB_AI_BRIEF_LATEST)
+    playbook = read_sheet(TAB_MARKETING_PLAYBOOK)
+    run_status = read_sheet(TAB_RUN_STATUS)
+    account_queue = read_sheet(TAB_ACCOUNT_PRIORITY_QUEUE)
+    decision_log = read_sheet(TAB_QUOTE_DECISION_LOG)
 
-    latest_df = _to_numeric(
-        latest_df,
+    if signal_latest.empty and LOCAL_SIGNAL_JSON.exists():
+        signal_latest = pd.DataFrame([json.loads(LOCAL_SIGNAL_JSON.read_text())])
+    if signal_history.empty and LOCAL_SIGNAL_HISTORY_CSV.exists():
+        signal_history = pd.read_csv(LOCAL_SIGNAL_HISTORY_CSV)
+    if signal_metrics.empty and LOCAL_SIGNAL_METRICS_CSV.exists():
+        signal_metrics = pd.read_csv(LOCAL_SIGNAL_METRICS_CSV)
+    if ai_brief.empty and LOCAL_AI_BRIEF_JSON.exists():
+        ai_brief = pd.DataFrame([json.loads(LOCAL_AI_BRIEF_JSON.read_text())])
+
+    signal_latest = _to_numeric(
+        signal_latest,
         [
-            "current_price",
-            "pred_price_final_t1",
-            "pred_price_corr_t1",
-            "pred_price_p10_t1",
-            "pred_price_p90_t1",
-            "baseline_price_t1",
-            "delta_abs",
-            "delta_pct",
-            "noharm_tau_abs",
-            "train_rows",
-            "feature_count",
+            "probability_action",
+            "technical_threshold",
+            "watch_threshold",
+            "current_block_close",
+            "block_price_range_pct",
+            "freshness_mean",
+            "freshness_min",
+            "staleness_max",
         ],
     )
-    history_df = _to_numeric(
-        history_df,
-        ["current_price", "actual_next_price", "model_price_t1", "baseline_price_t1"],
+    signal_history = _to_numeric(
+        signal_history,
+        ["probability_action", "actual_abs_return", "actual_return", "current_block_close"],
     )
-    summary_df = _to_numeric(summary_df, [col for col in summary_df.columns if col != "metric"])
-    articles_df = _to_numeric(articles_df, ["market_impact_score", "confidence"])
-    daily_df = _to_numeric(daily_df, [col for col in daily_df.columns if col != "news_date"])
-
-    if not daily_df.empty:
-        daily_df = daily_df.copy()
-        daily_df["dominant_channel"] = daily_df.apply(_dominant_channel, axis=1)
-        daily_df["tone_label"] = daily_df["market_sentiment_mean"].apply(_tone_label)
+    signal_metrics = _to_numeric(signal_metrics, ["value", "threshold", "acc", "bal_acc", "f1", "precision", "recall", "flag_rate"])
+    market_context = _to_numeric(
+        market_context,
+        [
+            "news_count_model",
+            "market_sentiment_mean",
+            "market_sentiment_sum",
+            "bullish_ratio",
+            "bearish_ratio",
+            "high_confidence_ratio",
+        ],
+    )
+    articles = _to_numeric(articles, ["market_impact_score", "confidence"])
+    run_status = _to_numeric(run_status, ["signal_probability_action"])
 
     return {
-        "latest": latest_df,
-        "history": history_df,
-        "summary": summary_df,
-        "articles": articles_df,
-        "daily": daily_df,
-        "status": status_df,
+        "signal_latest": signal_latest,
+        "signal_history": signal_history,
+        "signal_metrics": signal_metrics,
+        "market_context": market_context,
+        "articles": articles,
+        "ai_brief": ai_brief,
+        "playbook": playbook,
+        "run_status": run_status,
+        "account_queue": account_queue,
+        "decision_log": decision_log,
     }
 
 
 def build_view_model(state: dict) -> dict:
-    latest_df = state["latest"]
-    if latest_df.empty:
-        raise ValueError("Sheet xgb_latest_prediction masih kosong. Jalankan updater production dulu.")
+    signal_latest_df = state["signal_latest"]
+    if signal_latest_df.empty:
+        raise ValueError("Sheet signal_latest masih kosong. Jalankan pipeline production terbaru dulu.")
 
-    latest_row = latest_df.iloc[-1]
-    latest_data_ts = pd.to_datetime(latest_row["latest_data_date"], errors="coerce")
-    history_df = state["history"].copy()
-    history_rows = []
-    if not history_df.empty:
-        history_df = history_df.sort_values("base_date")
-        history_rows = history_df.tail(90).to_dict(orient="records")
-
-    summary_rows = state["summary"].to_dict(orient="records")
-    summary_latest = state["summary"].iloc[-1].to_dict() if not state["summary"].empty else {}
-
-    latest_daily = None
-    daily_df = state["daily"]
-    if not daily_df.empty:
-        latest_daily = daily_df.sort_values("news_date").iloc[-1].to_dict()
-
-    latest_news_date = None if latest_daily is None else str(latest_daily["news_date"])
-    tone_label = "Belum ada news" if latest_daily is None else str(latest_daily["tone_label"])
-    dominant_channel = "Belum ada" if latest_daily is None else str(latest_daily["dominant_channel"])
-    latest_news_ts = pd.to_datetime(latest_news_date, errors="coerce") if latest_news_date else pd.NaT
-    news_is_fresh = bool(pd.notna(latest_data_ts) and pd.notna(latest_news_ts) and latest_data_ts.date() == latest_news_ts.date())
-    if latest_daily is None:
-        sentiment_label = "Belum ada news"
-        sentiment_note = "Belum ada news relevan pada refresh sentiment terakhir."
-        sentiment_status = "Kosong"
-    elif news_is_fresh:
-        sentiment_label = tone_label
-        sentiment_note = (
-            f"Sentiment hari ini bersifat {tone_label.lower()} dengan channel utama {dominant_channel.lower()}."
-        )
-        sentiment_status = "Fresh"
-    else:
-        sentiment_label = "Belum ada news hari ini"
-        sentiment_note = (
-            f"Tidak ada news relevan baru untuk {latest_row['latest_data_date']}. "
-            f"Sentiment terakhir {tone_label.lower()} pada {latest_news_date} "
-            f"dengan channel utama {dominant_channel.lower()}."
-        )
-        sentiment_status = "Stale"
-
-    delta_pct = float(latest_row["delta_pct"])
-    model_signal = str(latest_row.get("signal", "Netral"))
-    executive_note = (
-        f"XGBoost memberi sinyal {model_signal.lower()} untuk {latest_row['forecast_date']} "
-        f"dengan perubahan {delta_pct:+.2f}%. "
-        f"{sentiment_note}"
+    latest_signal = signal_latest_df.iloc[-1].to_dict()
+    market_context_df = state["market_context"]
+    latest_context = (
+        market_context_df.sort_values("news_date").iloc[-1].to_dict() if not market_context_df.empty else {}
     )
+    ai_brief_df = state["ai_brief"]
+    latest_brief = ai_brief_df.iloc[-1].to_dict() if not ai_brief_df.empty else {}
+    run_status_df = state["run_status"]
+    latest_status = run_status_df.iloc[-1].to_dict() if not run_status_df.empty else {}
 
-    top_articles_df = state["articles"].copy()
-    top_articles = []
-    if not top_articles_df.empty:
-        top_articles_df = top_articles_df.sort_values("news_datetime", ascending=False).head(8).copy()
-        top_articles_df["impact_channel"] = top_articles_df["impact_channel"].map(CHANNEL_MAP).fillna(
-            top_articles_df["impact_channel"]
-        )
-        top_articles_df["impact_label"] = top_articles_df["impact_label"].map(IMPACT_LABEL_MAP).fillna(
-            top_articles_df["impact_label"]
-        )
-        top_articles = top_articles_df.to_dict(orient="records")
-
-    status_df = state["status"]
-    latest_status = status_df.iloc[-1].to_dict() if not status_df.empty else {}
-    freshness_note = "Data model dan sentiment berhasil dibaca dari spreadsheet production."
-    if latest_status:
-        sentiment_status = str(latest_status.get("sentiment_status", "")).strip()
-        if sentiment_status and sentiment_status not in {"refreshed", "up_to_date"}:
-            freshness_note = (
-                f"Sentiment status terakhir: {sentiment_status}. "
-                "Dashboard tetap memakai state terbaru yang tersimpan di spreadsheet."
-            )
+    probability = float(latest_signal.get("probability_action", 0.0))
+    action_level = str(latest_signal.get("action_level", "watch"))
+    action_label = action_label_id(action_level)
+    sentiment_mean = latest_context.get("market_sentiment_mean")
+    sentiment_label = _sentiment_label(sentiment_mean if sentiment_mean not in ("", None) else None)
 
     return {
-        "executive": {
-            "forecast_date": str(latest_row["forecast_date"]),
-            "latest_data_date": str(latest_row["latest_data_date"]),
-            "current_price": float(latest_row["current_price"]),
-            "predicted_price_t1": float(latest_row["pred_price_final_t1"]),
-            "predicted_price_p10_t1": float(latest_row["pred_price_p10_t1"]),
-            "predicted_price_p90_t1": float(latest_row["pred_price_p90_t1"]),
-            "baseline_price_t1": float(latest_row["baseline_price_t1"]),
-            "delta_pct": float(latest_row["delta_pct"]),
-            "signal": model_signal,
-            "sentiment_label": sentiment_label,
-            "sentiment_score": 0.0 if latest_daily is None else float(latest_daily["market_sentiment_mean"]),
-            "headline_note": executive_note,
-        },
-        "model": {
-            "latest_data_date": str(latest_row["latest_data_date"]),
-            "forecast_date": str(latest_row["forecast_date"]),
-            "current_price": float(latest_row["current_price"]),
-            "pred_price_final_t1": float(latest_row["pred_price_final_t1"]),
-            "pred_price_corr_t1": float(latest_row["pred_price_corr_t1"]),
-            "pred_price_p10_t1": float(latest_row["pred_price_p10_t1"]),
-            "pred_price_p90_t1": float(latest_row["pred_price_p90_t1"]),
-            "baseline_price_t1": float(latest_row["baseline_price_t1"]),
-            "signal": model_signal,
-            "gate_applied": str(latest_row.get("gate_applied", "")),
-            "regime_active": str(latest_row.get("regime_active", "")),
-            "locked_baseline_name": str(latest_row.get("locked_baseline_name", "")),
-            "summary_rows": summary_rows,
-            "summary_latest": summary_latest,
-            "recent_history": history_rows,
-        },
-        "sentiment": {
-            "latest_news_date": latest_news_date,
-            "latest_model_date": str(latest_row["latest_data_date"]),
-            "latest_daily": latest_daily,
-            "news_is_fresh": news_is_fresh,
-            "sentiment_status": sentiment_status,
-            "sentiment_note": sentiment_note,
-            "recent_daily": daily_df.tail(60).to_dict(orient="records") if not daily_df.empty else [],
-            "top_articles": top_articles,
-        },
-        "data_health": {
-            "freshness_note": freshness_note,
-            "spreadsheet_name": SPREADSHEET_NAME,
-            "latest_pipeline_status": latest_status,
-        },
+        "latest_signal": latest_signal,
+        "signal_history": state["signal_history"].copy(),
+        "signal_metrics": state["signal_metrics"].copy(),
+        "market_context": market_context_df.copy(),
+        "articles": state["articles"].copy(),
+        "latest_context": latest_context,
+        "latest_brief": latest_brief,
+        "playbook": state["playbook"].copy(),
+        "run_status": latest_status,
+        "account_queue": state["account_queue"].copy(),
+        "decision_log": state["decision_log"].copy(),
+        "headline_note": (
+            f"Signal saat ini berada pada level {action_label.lower()} dengan probability {probability:.2f}. "
+            f"{latest_brief.get('recommended_action', 'Gunakan signal ini sebagai alat bantu keputusan.')}"
+        ),
+        "sentiment_label": sentiment_label,
     }
 
 
-with st.sidebar:
-    st.title("INALUM Dashboard")
-    st.caption("XGBoost H+1 + Market Sentiment Context")
-    page = st.radio("Menu", ["Executive Summary", "Model Detail", "Market Sentiment"])
+def render_executive_signal(view: dict) -> None:
+    latest_signal = view["latest_signal"]
+    latest_brief = view["latest_brief"]
+    action_level = str(latest_signal.get("action_level", "watch"))
+    style = ACTION_STYLE.get(action_level, ACTION_STYLE["watch"])
+    probability = float(latest_signal.get("probability_action", 0.0))
+
+    left, right = st.columns([1.3, 1.0])
+    with left:
+        st.markdown(
+            f"""
+            <div class="hero-card" style="background:linear-gradient(180deg,{style['bg']} 0%,rgba(255,255,255,0.85) 100%);">
+              <div class="hero-title">Status Marketing Hari Ini</div>
+              <div class="hero-value" style="color:{style['accent']};">{action_label_id(action_level)}</div>
+              <div class="hero-sub">
+                Probability action: <b>{probability:.2f}</b><br/>
+                Forecast window: <b>{latest_signal.get('forecast_window_start', '-')}</b> s.d. <b>{latest_signal.get('forecast_window_end', '-')}</b>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.progress(min(max(probability, 0.0), 1.0))
+        st.caption("Semakin tinggi probability, semakin kuat sinyal bahwa periode pasar ini perlu perhatian lebih.")
+
+    with right:
+        st.markdown(
+            f"""
+            <div class="soft-card">
+              <div class="hero-title">Inti Rekomendasi</div>
+              <div style="font-size:1.02rem;color:#1E1B16;line-height:1.65;">
+                {latest_brief.get('recommended_action', latest_signal.get('signal_reason_short', '-'))}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    render_metric_cards(
+        [
+            ("Signal", latest_signal.get("action_label_id", "-")),
+            ("Urgency", latest_signal.get("urgency", "-")),
+            ("Sentiment", view["sentiment_label"]),
+            ("Harga Acuan Blok", _format_number(latest_signal.get("current_block_close"))),
+        ]
+    )
+
     st.markdown("---")
-    st.caption("Spreadsheet source")
+    st.info(view["headline_note"])
+
+    brief_summary = latest_brief.get("executive_summary")
+    if brief_summary:
+        st.subheader("Ringkasan untuk Tim Marketing")
+        st.write(brief_summary)
+
+    why_it_matters = latest_brief.get("why_it_matters")
+    if why_it_matters:
+        st.subheader("Kenapa Ini Penting")
+        st.write(why_it_matters)
+
+    driver_cols = st.columns(3)
+    for idx, key in enumerate(["top_driver_1", "top_driver_2", "top_driver_3"]):
+        with driver_cols[idx]:
+            st.markdown(
+                f"""
+                <div class="soft-card">
+                  <div class="hero-title">Driver {idx + 1}</div>
+                  <div style="font-size:1rem;font-weight:600;color:#1E1B16;">{latest_signal.get(key, '-') or '-'}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.subheader("Trend Signal Terbaru")
+    render_signal_history(view["signal_history"])
+
+
+def render_market_context(view: dict) -> None:
+    st.subheader("Konteks News dan Pasar")
+    render_sentiment_plot(view["market_context"])
+
+    latest_context = view["latest_context"]
+    if latest_context:
+        render_metric_cards(
+            [
+                ("Tanggal News", str(latest_context.get("news_date", "-"))),
+                ("News Count", str(int(float(latest_context.get("news_count_model", 0) or 0)))),
+                ("Sentiment Mean", _format_number(latest_context.get("market_sentiment_mean"))),
+                ("High Confidence Ratio", _format_percent(latest_context.get("high_confidence_ratio"))),
+            ]
+        )
+
+    st.markdown("---")
+    st.subheader("Headline News Terbaru")
+    articles = view["articles"].copy()
+    if articles.empty:
+        st.info("Belum ada artikel hasil scoring yang tersedia.")
+    else:
+        articles = articles.sort_values("news_datetime", ascending=False).head(8).copy()
+        display_df = pd.DataFrame(
+            {
+                "Tanggal": articles.get("news_date", "-"),
+                "Headline": articles.get("title", "-"),
+                "Arah": articles.get("impact_label", "-"),
+                "Topik": articles.get("impact_channel", "-"),
+                "Skor": pd.to_numeric(articles.get("market_impact_score"), errors="coerce").map(
+                    lambda value: "-" if pd.isna(value) else f"{value:+.2f}"
+                ),
+                "Key Insight": articles.get("reason_short", "-").fillna("-"),
+            }
+        )
+        render_dataframe(display_df)
+
+
+def render_action_center(view: dict) -> None:
+    latest_brief = view["latest_brief"]
+
+    col1, col2 = st.columns([1.2, 1.0])
+    with col1:
+        st.subheader("Rekomendasi Tindakan")
+        st.markdown(
+            f"""
+            <div class="soft-card">
+              <div class="hero-title">Recommended Action</div>
+              <div style="font-size:1.05rem;line-height:1.7;color:#1E1B16;">
+                {latest_brief.get('recommended_action', '-')}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.subheader("Caution Internal")
+        st.warning(latest_brief.get("internal_caution_note", "Belum ada caution note."))
+
+    with col2:
+        st.subheader("Cara Baca Signal")
+        playbook = view["playbook"].copy()
+        if playbook.empty:
+            st.info("Playbook belum tersedia.")
+        else:
+            render_dataframe(playbook[["label_id", "probability_range", "urgency", "recommended_action"]])
+
+    st.markdown("---")
+    st.subheader("Talking Points untuk Pelanggan")
+    talking_points = _split_talking_points(latest_brief.get("customer_talking_points"))
+    if not talking_points:
+        st.info("Belum ada talking points yang tersedia.")
+    else:
+        for item in talking_points:
+            st.markdown(f"- {item}")
+
+    st.markdown("---")
+    st.subheader("Prioritas Account")
+    account_queue = view["account_queue"].copy()
+    if account_queue.empty:
+        st.info("Sheet account priority queue masih kosong. Bisa dipakai tim marketing sebagai daftar prioritas manual.")
+    else:
+        render_dataframe(account_queue.head(20))
+
+
+def render_ops_and_audit(view: dict) -> None:
+    latest_status = view["run_status"]
+    metrics = view["signal_metrics"].copy()
+
+    st.subheader("Status Pipeline")
+    if latest_status:
+        status_df = pd.DataFrame([latest_status])
+        render_dataframe(status_df)
+    else:
+        st.info("Status pipeline belum tersedia.")
+
+    st.subheader("Ringkasan Model")
+    if metrics.empty:
+        st.info("Metrik model belum tersedia.")
+    else:
+        summary_df = metrics[metrics["section"].eq("summary")].copy()
+        if not summary_df.empty:
+            render_dataframe(summary_df[["metric", "value", "meaning"]])
+
+        threshold_df = metrics[metrics["section"].eq("threshold_tradeoff")].copy()
+        if not threshold_df.empty:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            for col, color in [
+                ("bal_acc", "#A64600"),
+                ("precision", "#53624E"),
+                ("recall", "#C67A00"),
+                ("flag_rate", "#6B7280"),
+            ]:
+                ax.plot(threshold_df["threshold"], threshold_df[col], marker="o", linewidth=2, label=col, color=color)
+            ax.set_title("Threshold Trade-off")
+            ax.set_xlabel("Threshold")
+            ax.set_ylabel("Skor / Rate")
+            ax.grid(alpha=0.18)
+            ax.legend()
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+    st.subheader("Audit Log")
+    decision_log = view["decision_log"].copy()
+    if decision_log.empty:
+        st.info("Quote decision log masih kosong. Ini nantinya dipakai untuk membuktikan manfaat bisnis model.")
+    else:
+        render_dataframe(decision_log.tail(30))
+
+
+_apply_theme()
+
+with st.sidebar:
+    st.title("INALUM Marketing")
+    st.caption("Decision-support dashboard for 5-day signal")
+    page = st.radio(
+        "Halaman",
+        ["Executive Signal", "Market Context", "Action Center", "Ops & Audit"],
+    )
+    st.markdown("---")
+    st.caption("Workbook source")
     st.code(SPREADSHEET_NAME)
 
 
 try:
     state = load_production_state()
-    payload = build_view_model(state)
+    view = build_view_model(state)
 except Exception as exc:
-    st.error("Dashboard belum bisa membaca state production dari Google Sheets.")
-    st.info(
-        "Pastikan spreadsheet production sudah terisi dan secret `GCP_SERVICE_ACCOUNT_JSON` tersedia di Streamlit Cloud."
-    )
+    st.error("Dashboard belum bisa membaca state production baru dari Google Sheets.")
+    st.info("Pastikan pipeline production terbaru sudah dijalankan dan workbook baru sudah terisi.")
     st.code(str(exc))
     st.stop()
 
 
-executive = payload["executive"]
-model = payload["model"]
-sentiment = payload["sentiment"]
-data_health = payload["data_health"]
+st.title("INALUM Marketing Decision Dashboard")
+st.caption("Fokus dashboard ini adalah membantu tim marketing memutuskan kapan perlu mengabaikan, memantau, atau menindak sinyal pasar.")
 
-
-if page == "Executive Summary":
-    st.title("Executive Summary")
-    render_metric_cards(
-        [
-            ("Tanggal Prediksi", str(executive["forecast_date"])),
-            ("Harga Terakhir", f"{executive['current_price']:.2f}"),
-            ("Prediksi H+1", f"{executive['predicted_price_t1']:.2f}"),
-            ("Delta (%)", f"{executive['delta_pct']:+.2f}%"),
-            ("Sentiment", str(executive["sentiment_label"])),
-        ]
-    )
-    st.markdown("---")
-    st.info(executive["headline_note"])
-
-    history = pd.DataFrame(model.get("recent_history", []))
-    render_history_plot(history)
-
-    top_articles = pd.DataFrame(sentiment.get("top_articles", []))
-    if not top_articles.empty:
-        st.subheader("Berita Terbaru yang Paling Relevan")
-        render_simple_table(
-            top_articles[
-                ["news_date", "title", "impact_label", "impact_channel", "market_impact_score", "confidence"]
-            ].copy()
-        )
-
-elif page == "Model Detail":
-    st.title("Model Detail")
-    today_view = pd.DataFrame(
-        [
-            {
-                "Metrik": "Harga terakhir",
-                "Nilai": _format_number(model["current_price"]),
-                "Makna": "Harga penutupan terbaru yang menjadi dasar prediksi hari berikutnya.",
-            },
-            {
-                "Metrik": "Prediksi XGBoost H+1",
-                "Nilai": _format_number(model["pred_price_final_t1"]),
-                "Makna": "Estimasi harga untuk 1 hari perdagangan berikutnya dari model utama.",
-            },
-            {
-                "Metrik": "Prediksi model pembanding H+1",
-                "Nilai": _format_number(model["baseline_price_t1"]),
-                "Makna": "Acuan sederhana untuk mengecek apakah XGBoost memberi nilai tambah.",
-            },
-            {
-                "Metrik": "Rentang prediksi",
-                "Nilai": f"{_format_number(model['pred_price_p10_t1'])} s.d. {_format_number(model['pred_price_p90_t1'])}",
-                "Makna": "Kisaran harga yang masih dianggap masuk akal oleh model untuk prediksi hari berikutnya.",
-            },
-            {
-                "Metrik": "Sinyal hari ini",
-                "Nilai": str(model["signal"]),
-                "Makna": "Ringkasan arah pandangan model untuk prediksi besok.",
-            },
-        ]
-    )
-    render_simple_table(today_view)
-
-    st.subheader("Ringkasan Kinerja Model")
-    performance = build_model_performance_view(model.get("summary_latest", {}))
-    if performance["cards"]:
-        render_metric_cards(performance["cards"])
-    st.info(performance["note"])
-    render_simple_table(pd.DataFrame(performance["rows"]))
-
-elif page == "Market Sentiment":
-    st.title("Market Sentiment")
-    latest_daily = sentiment.get("latest_daily")
-    if latest_daily:
-        render_metric_cards(
-            [
-                ("Tanggal Acuan Harga", str(sentiment["latest_model_date"])),
-                ("Tanggal News Terbaru", str(sentiment["latest_news_date"])),
-                ("Status News", str(sentiment["sentiment_status"])),
-                ("Sentiment Mean", f"{float(latest_daily['market_sentiment_mean']):+.2f}"),
-                ("Tone / Channel", f"{latest_daily['tone_label']} / {latest_daily['dominant_channel']}"),
-            ]
-        )
-        if not sentiment.get("news_is_fresh", False):
-            st.warning(sentiment["sentiment_note"])
-    else:
-        st.warning("Belum ada news relevan terbaru pada refresh sentiment terakhir.")
-
-    recent_daily = pd.DataFrame(sentiment.get("recent_daily", []))
-    render_sentiment_plot(recent_daily)
-
-    top_articles = pd.DataFrame(sentiment.get("top_articles", []))
-    if not top_articles.empty:
-        st.subheader("Headline News Terbaru")
-        display_cols = pd.DataFrame(
-            {
-                "Tanggal": top_articles.get("news_date", "-"),
-                "Headline": top_articles.get("title", "-"),
-                "Skor": pd.to_numeric(top_articles.get("market_impact_score"), errors="coerce").map(
-                    lambda value: "-" if pd.isna(value) else f"{value:+.2f}"
-                ),
-                "Arah": top_articles.get("impact_label", "-"),
-                "Topik Utama": top_articles.get("impact_channel", "-"),
-                "Insight AI": top_articles.get("reason_short", "-").fillna("-"),
-            }
-        ).head(5)
-        render_simple_table(display_cols)
-    else:
-        st.info("Detail headline news belum tersedia di sheet artikel sentiment.")
+if page == "Executive Signal":
+    render_executive_signal(view)
+elif page == "Market Context":
+    render_market_context(view)
+elif page == "Action Center":
+    render_action_center(view)
+else:
+    render_ops_and_audit(view)

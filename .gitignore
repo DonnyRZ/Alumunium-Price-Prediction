@@ -9,8 +9,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.ipynb_checkpoints/
-*.ipynb
 
 # Virtual environments
 .venv/
@@ -19,8 +17,10 @@ ENV/
 env/
 
 # Jupyter
+# Track real notebooks; ignore only checkpoints and archived scratch work.
 .ipynb_checkpoints/
 .jupyter/
+notebooks/Archive/
 
 # Environment files
 .env
@@ -54,6 +54,10 @@ notebooks/data/
 data/news/**
 data/raw\ data/**
 data/processed\ data/**
+data/processed/
+data/Exogenous/
+data/LME\ -\ Alumunium\ -\ daily.csv
+data/LME\ -\ Alumunium\ -\ monthly.csv
 production/data/**
 
 # ML models & caches

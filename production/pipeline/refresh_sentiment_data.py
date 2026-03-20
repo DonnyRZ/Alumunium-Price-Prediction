@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from production.gsheet_manager import overwrite_sheet, read_sheet
-from production.sheet_contract import TAB_SENTIMENT_ARTICLES, TAB_SENTIMENT_DAILY
+from production.sheet_contract import TAB_ARTICLES_SCORED, TAB_MARKET_CONTEXT_DAILY
 from src.news.backfill_gdelt_history import (
     QUERY_MAP,
     USER_AGENT,
@@ -112,6 +113,10 @@ def _is_fatal_network_error(text: str) -> bool:
         "nodename nor servname provided",
     ]
     return any(pattern in lowered for pattern in patterns)
+
+
+def _sanitize_error_message(message: str) -> str:
+    return re.sub(r"key=[A-Za-z0-9_\-]+", "key=***", str(message))
 
 
 def _empty_scored_df() -> pd.DataFrame:
@@ -254,16 +259,16 @@ def aggregate_daily_features(scored_df: pd.DataFrame, confidence_threshold: floa
 
 
 def _write_sentiment_state(scored_df: pd.DataFrame, daily_df: pd.DataFrame) -> None:
-    overwrite_sheet(scored_df, TAB_SENTIMENT_ARTICLES)
-    overwrite_sheet(daily_df, TAB_SENTIMENT_DAILY)
+    overwrite_sheet(scored_df, TAB_ARTICLES_SCORED)
+    overwrite_sheet(daily_df, TAB_MARKET_CONTEXT_DAILY)
 
 
 def refresh_sentiment_data() -> dict:
     production_settings = build_production_settings()
     news_settings = build_settings()
 
-    existing_scored = _coerce_scored_sheet(read_sheet(TAB_SENTIMENT_ARTICLES))
-    existing_daily = _coerce_daily_sheet(read_sheet(TAB_SENTIMENT_DAILY))
+    existing_scored = _coerce_scored_sheet(read_sheet(TAB_ARTICLES_SCORED))
+    existing_daily = _coerce_daily_sheet(read_sheet(TAB_MARKET_CONTEXT_DAILY))
 
     if existing_scored.empty:
         seed_scored = _load_local_scored_seed()
@@ -278,7 +283,7 @@ def refresh_sentiment_data() -> dict:
     except Exception as exc:
         return {
             "status": "used_existing_after_fetch_error",
-            "error": str(exc),
+            "error": _sanitize_error_message(str(exc)),
             "candidate_rows": 0,
             "newly_scored_rows": 0,
             "article_rows": int(len(existing_scored)),
@@ -353,7 +358,7 @@ def refresh_sentiment_data() -> dict:
                 max_reason_chars=news_settings.max_reason_chars,
             )
         except Exception as exc:
-            scoring_error = str(exc)
+            scoring_error = _sanitize_error_message(str(exc))
             break
 
         scored_rows.append(

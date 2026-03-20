@@ -60,12 +60,73 @@ def get_spreadsheet():
     return client.open(SPREADSHEET_NAME)
 
 
+def list_worksheet_titles() -> list[str]:
+    spreadsheet = get_spreadsheet()
+    return [worksheet.title for worksheet in spreadsheet.worksheets()]
+
+
 def get_worksheet(tab_name: str, rows: int = 2000, cols: int = 40):
     spreadsheet = get_spreadsheet()
     try:
         return spreadsheet.worksheet(tab_name)
     except Exception:
         return spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
+
+
+def delete_worksheet_if_exists(tab_name: str) -> bool:
+    spreadsheet = get_spreadsheet()
+    try:
+        worksheet = spreadsheet.worksheet(tab_name)
+    except Exception:
+        return False
+    spreadsheet.del_worksheet(worksheet)
+    return True
+
+
+def reset_workbook_tabs(required_tabs: Iterable[str], rows: int = 2000, cols: int = 40) -> list[str]:
+    spreadsheet = get_spreadsheet()
+    required_tabs = list(dict.fromkeys(required_tabs))
+    existing = spreadsheet.worksheets()
+    existing_titles = [worksheet.title for worksheet in existing]
+    created_temp = None
+
+    if len(existing) == 1 and existing[0].title in required_tabs and len(required_tabs) == 1:
+        return existing_titles
+
+    # Google Sheets refuses deleting the last remaining worksheet.
+    # Create a temporary worksheet whenever the current workbook would
+    # otherwise be fully removed during the cleanup pass.
+    has_required_sheet_already = any(title in required_tabs for title in existing_titles)
+    if len(existing) == 1 or not has_required_sheet_already:
+        temp_title = "_tmp_reset_"
+        if temp_title in existing_titles:
+            created_temp = spreadsheet.worksheet(temp_title)
+        else:
+            created_temp = spreadsheet.add_worksheet(title=temp_title, rows=max(rows, 10), cols=max(cols, 5))
+        existing = spreadsheet.worksheets()
+
+    temp_title = created_temp.title if created_temp is not None else None
+
+    for worksheet in list(existing):
+        if worksheet.title == temp_title:
+            continue
+        if worksheet.title not in required_tabs:
+            spreadsheet.del_worksheet(worksheet)
+
+    final_titles = [worksheet.title for worksheet in spreadsheet.worksheets()]
+    for tab_name in required_tabs:
+        if tab_name not in final_titles:
+            spreadsheet.add_worksheet(title=tab_name, rows=rows, cols=cols)
+
+    if created_temp is not None:
+        try:
+            worksheet = spreadsheet.worksheet(created_temp.title)
+            if worksheet.title not in required_tabs:
+                spreadsheet.del_worksheet(worksheet)
+        except Exception:
+            pass
+
+    return [worksheet.title for worksheet in spreadsheet.worksheets()]
 
 
 def _normalize_df_for_sheet(df: pd.DataFrame) -> pd.DataFrame:
